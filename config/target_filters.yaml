@@ -1,0 +1,12 @@
+categories:
+  toys: "5xtb0"
+  games: "5xtg5"
+
+facets:
+  sold_by_target: "dq4mn"
+
+sort_options:
+  bestselling: "bestselling"
+  relevance: "relevance"
+  price_low: "PriceLow"
+  price_high: "PriceHigh"

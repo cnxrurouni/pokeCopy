@@ -1,0 +1,12 @@
+categories:
+  toys: "4171_4191_4186"
+  trading_cards: "4171_4191_4186_132959"
+
+facets:
+  sold_by_walmart: "retailer_type:Walmart"
+
+sort_options:
+  best_match: "best_match"
+  price_low: "price_low"
+  price_high: "price_high"
+  best_seller: "best_seller"

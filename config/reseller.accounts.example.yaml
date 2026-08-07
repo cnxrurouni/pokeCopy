@@ -1,0 +1,29 @@
+# Copy to config/reseller.accounts.yaml and fill in real values.
+# THIS FILE CONTAINS SECRETS WHEN FILLED IN — the real file must be gitignored.
+#
+# One account is pinned to one static residential/ISP proxy and one fingerprint.
+# Never share a proxy across accounts (linked accounts get mass-suspended).
+
+# Proxy pool. Each account references one by 'proxy_label'.
+proxies:
+  - label: resi-us-01
+    server: "http://gate.example-resi.com:7000"
+    username: "proxy-user"
+    password: "proxy-pass"
+    geo: "90001"
+    sticky: true
+
+accounts:
+  - id: acct_target_01
+    retailer: target
+    email: you@example.com
+    password: "your-password"
+    aged: true
+    proxy_label: resi-us-01
+    payment_label: card-01
+    fingerprint:
+      user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+      locale: en-US
+      timezone_id: America/Los_Angeles
+      canvas_seed: 12345
+    session_cookies: {}

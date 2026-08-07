@@ -1,0 +1,36 @@
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Runtime data — tokens, Chrome profiles, HTTP telemetry, captures, debug dumps
+/data/*
+!/data/.gitkeep
+
+# Local credential / account files (use the *.example.* templates)
+config/reseller.accounts.yaml
+config/target.credentials.yaml

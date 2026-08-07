@@ -1,0 +1,82 @@
+{
+  "retailer": "target",
+  "cookies": {},
+  "variables": {},
+  "sequence": [
+    "add_to_cart",
+    "checkout",
+    "pre_checkout",
+    "place_order"
+  ],
+  "requests": [
+    {
+      "name": "add_to_cart",
+      "method": "POST",
+      "url": "https://carts.target.com/web_checkouts/v1/cart_items?field_groups=CART%2CCART_ITEMS%2CSUMMARY&key=9f36aeafbe60771e321a7cc95a78140772ab3e96",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "referer": "{{product_url}}",
+        "accept-language": "en-US"
+      },
+      "body": "{\"cart_item\":{\"item_channel_id\":\"10\",\"tcin\":\"{{tcin}}\",\"quantity\":{{quantity}}},\"cart_type\":\"REGULAR\",\"channel_id\":\"10\",\"shopping_context\":\"DIGITAL\"}",
+      "extract": {},
+      "success_contains": null,
+      "expect_status": 200,
+      "commits_order": false
+    },
+    {
+      "name": "checkout",
+      "method": "PUT",
+      "url": "https://carts.target.com/web_checkouts/v1/cart?cart_type=REGULAR&field_groups=ADDRESSES%2CCART%2CCART_ITEMS%2CFINANCE_PROVIDERS%2CPROMOTION_CODES%2CSUMMARY&key=e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
+      "headers": {
+        "referer": "https://www.target.com/cart",
+        "accept-language": "en-US",
+        "accept": "application/json",
+        "content-type": "application/json"
+      },
+      "body": "{\"cart_type\":\"REGULAR\",\"shopping_context\":\"DIGITAL\",\"channel_id\":\"10\",\"guest_location\":{\"country\":\"US\",\"latitude\":\"34.224590\",\"longitude\":\"-118.419214\",\"state\":\"CA\",\"zip_code\":\"91352\"},\"shopping_location_id\":\"2329\"}",
+      "extract": {},
+      "success_contains": null,
+      "expect_status": 200,
+      "commits_order": false
+    },
+    {
+      "name": "pre_checkout",
+      "method": "POST",
+      "url": "https://carts.target.com/web_checkouts/v1/pre_checkout?cart_type=REGULAR&field_groups=ADDRESSES%2CCART%2CCART_ITEMS%2CDELIVERY_WINDOWS%2CFINANCE_PROVIDERS%2CPAYMENT_INSTRUCTIONS%2CPICKUP_INSTRUCTIONS%2CPROMOTION_CODES%2CSUMMARY&key=e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
+      "headers": {
+        "referer": "https://www.target.com/checkout/start",
+        "accept-language": "en-US",
+        "accept": "application/json",
+        "content-type": "application/json",
+        "x-application-name": "web"
+      },
+      "body": "{\"cart_type\":\"REGULAR\",\"channel_id\":\"10\"}",
+      "extract": {},
+      "success_contains": null,
+      "expect_status": 201,
+      "commits_order": false
+    },
+    {
+      "name": "place_order",
+      "method": "POST",
+      "url": "https://carts.target.com/web_checkouts/v1/checkout?cart_type=REGULAR&field_groups=ADDRESSES%2CCART%2CCART_ITEMS%2CFINANCE_PROVIDERS%2CPAYMENT_INSTRUCTIONS%2CPICKUP_INSTRUCTIONS%2CPROMOTION_CODES%2CSUMMARY&key=e59ce3b531b2c39afb2e2b8a71ff10113aac2a14",
+      "headers": {
+        "accept": "application/json",
+        "content-type": "application/json",
+        "referer": "https://www.target.com/checkout",
+        "accept-language": "en-US"
+      },
+      "body": "{\"cart_type\":\"REGULAR\",\"channel_id\":\"10\"}",
+      "extract": {
+        "reference_id": "orders.0.reference_id",
+        "order_number": "orders.0.order_number",
+        "order_id": "orders.0.order_id"
+      },
+      "success_contains": "order",
+      "expect_status": 200,
+      "commits_order": true
+    }
+  ]
+}

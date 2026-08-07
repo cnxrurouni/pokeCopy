@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pokebot"
+version = "0.2.0"
+description = "RestockR listener + Target HTTP checkout (curl_cffi) for Pokemon TCG"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "aiosqlite>=0.19",
+    "python-socketio[asyncio_client]>=5.11",
+    "aiohttp>=3.9",
+    # RestockR + Target cart TLS: curl_cffi JA3 impersonation (not Playwright).
+    "curl_cffi>=0.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+pokebot = "pokebot.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pokebot"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/pokebot" = "pokebot"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

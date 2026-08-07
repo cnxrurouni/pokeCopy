@@ -1,0 +1,37 @@
+reseller:
+  # Dry-run skips network I/O. Set false for live RestockR → HTTP checkout.
+  dry_run: false
+
+  global_concurrency: 10
+  per_account_concurrency: 1
+
+  # Sidecar _px3 TTL guidance for the in-memory token bank.
+  px_token_ttl_seconds: 300
+
+  max_attempts: 3
+  max_quantity: null
+
+  atc_spam_timeout_seconds: 90
+  checkout_spam_timeout_seconds: 120
+  # ATC often needs a few tries; space retries randomly ~1–2s to avoid 429.
+  atc_retry_delay_ms_min: 1000
+  atc_retry_delay_ms_max: 2000
+  # Checkout / pre_checkout / place_order retries — same pace.
+  spam_delay_ms_min: 1000
+  spam_delay_ms_max: 2000
+  # Optional: open Chrome /cart→/checkout before ATC to refresh PX.
+  # Default off — login target already exports auth+_px3; warming with CDP
+  # right before HTTP often triggers transient Go-Proxy 401 (MI6 issuer).
+  warm_cart_checkout: false
+  warm_dwell_seconds: 3.0
+  # Stop after a few AUTH_DENIED — do not hammer PX for a minute.
+  auth_denied_abort_after: 3
+  # On 429: cool down (Retry-After or 30s), then retry; abort after N cooldowns.
+  rate_limit_abort_after: 3
+  rate_limit_cooldown_seconds: 30
+
+  accounts_path: null
+  capture_path: null
+
+  # curl_cffi TLS impersonation — pin explicitly (no Playwright channel).
+  curl_impersonate: "chrome146"

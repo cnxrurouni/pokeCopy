@@ -1,0 +1,29 @@
+{
+  "data": {
+    "search": {
+      "products": [
+        {
+          "tcin": "12345678",
+          "price": {
+            "current_retail": 49.99,
+            "formatted_current_price": "$49.99"
+          },
+          "item": {
+            "product_description": {
+              "title": "Pokemon Test ETB"
+            },
+            "primary_brand": {
+              "name": "Pokemon"
+            },
+            "enrichment": {
+              "buy_url": "https://www.target.com/p/-/A-12345678"
+            }
+          },
+          "availability": {
+            "is_shipping_available": true
+          }
+        }
+      ]
+    }
+  }
+}
