@@ -28,7 +28,7 @@ python -m pokebot login restockr
 python -m pokebot login target          # real Chrome; exports auth+_px3
 python -m pokebot doctor                # arch + RestockR + fingerprint + sidecar
 python -m pokebot reseller target --url "https://www.target.com/p/..." --preflight
-python -m pokebot reseller run          # LIVE if config/reseller.yaml dry_run: false
+python -m pokebot reseller run          # LIVE RestockR → HTTP checkout
 python -m pokebot open-alerts           # listen + open URLs in everyday Chrome only
 python -m pokebot status
 ```
@@ -41,7 +41,7 @@ Live place_order may need `export TARGET_CVV=…` when Target requires CVV.
 | File | Role |
 |------|------|
 | [`config/settings.yaml`](config/settings.yaml) | RestockR + watchlist/retailer filters |
-| [`config/reseller.yaml`](config/reseller.yaml) | `dry_run`, `curl_impersonate`, retry/abort thresholds |
+| [`config/reseller.yaml`](config/reseller.yaml) | `curl_impersonate`, retry/abort thresholds |
 | [`config/reseller.capture.target.json`](config/reseller.capture.target.json) | Captured Target API chain |
 
 HTTP fingerprint: UA + Client Hints are pinned to match `curl_impersonate` (default

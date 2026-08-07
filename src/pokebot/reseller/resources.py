@@ -67,8 +67,8 @@ class FingerprintFactory:
 class AccountStore:
     """Loads accounts and enforces pinned resources per account.
 
-    Accounts carry secrets, so the backing file must be gitignored. In dry-run
-    mode a synthetic account can be created without a file.
+    Accounts carry secrets, so the backing file must be gitignored. Tests can
+    inject a synthetic account without a file.
     """
 
     def __init__(self, accounts: list[Account] | None = None) -> None:
@@ -102,13 +102,13 @@ class AccountStore:
         self._in_use.discard(account.id)
 
     @staticmethod
-    def synthetic(retailer: Retailer, *, email: str = "dryrun@example.com") -> Account:
+    def synthetic(retailer: Retailer, *, email: str = "test@example.com") -> Account:
         return Account(
             retailer=retailer,
             email=email,
             aged=True,
             proxy_label=None,
-            payment_label="dry-run-card",
+            payment_label="test-card",
         )
 
     @staticmethod

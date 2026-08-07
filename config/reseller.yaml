@@ -1,7 +1,5 @@
 reseller:
-  # Dry-run skips network I/O. Set false for live RestockR → HTTP checkout.
-  dry_run: false
-
+  # Always live — RestockR → HTTP checkout places real orders.
   global_concurrency: 10
   per_account_concurrency: 1
 

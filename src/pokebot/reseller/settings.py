@@ -9,7 +9,6 @@ from pokebot.config import config_dir
 
 
 class ResellerSettings(BaseModel):
-    dry_run: bool = True
     global_concurrency: int = 10
     per_account_concurrency: int = 1
     px_token_ttl_seconds: float = 300.0

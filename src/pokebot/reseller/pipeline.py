@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-
 from rich.console import Console
 
 from pokebot.enums import Retailer
@@ -83,7 +81,6 @@ class TargetPipeline:
             "chrome", curl_impersonate_override=impersonate
         )
         checkout = TargetHttpCheckout(
-            dry_run=settings.dry_run,
             impersonate=identity.curl_impersonate,
             identity=identity,
             capture_path=settings.resolved_capture_path(),
@@ -178,7 +175,7 @@ class TargetPipeline:
     async def _execute_task(self, task: CheckoutTask, account: Account) -> TaskResult:
         from pokebot.reseller.target_ids import is_plausible_tcin
 
-        if not self.settings.dry_run and not is_plausible_tcin(task.sku):
+        if not is_plausible_tcin(task.sku):
             return TaskResult(
                 task_id=task.id,
                 retailer=self.retailer,
@@ -199,47 +196,37 @@ class TargetPipeline:
             task.attempts = attempt
             task.status = TaskStatus.TOKEN_WAIT
 
-            if self.settings.dry_run:
-                token = HarvestedToken(
-                    kind=TokenKind.PX3,
-                    retailer=self.retailer,
-                    value="dry-run",
-                    cookies={"_px3": "dry-run", "accessToken": "dry-run"},
-                    ttl_seconds=60,
-                    account_id=account.id,
+            token = await self.token_bank.acquire(
+                self.retailer, TokenKind.PX3, account_id=account.id
+            )
+            if token is None:
+                token = token_from_sidecar(
+                    account.id, ttl_seconds=self.settings.px_token_ttl_seconds
                 )
-            else:
-                token = await self.token_bank.acquire(
-                    self.retailer, TokenKind.PX3, account_id=account.id
-                )
-                if token is None:
-                    token = token_from_sidecar(
-                        account.id, ttl_seconds=self.settings.px_token_ttl_seconds
+                if token is not None:
+                    await self.token_bank.deposit(token)
+                    token = await self.token_bank.acquire(
+                        self.retailer, TokenKind.PX3, account_id=account.id
                     )
-                    if token is not None:
-                        await self.token_bank.deposit(token)
-                        token = await self.token_bank.acquire(
-                            self.retailer, TokenKind.PX3, account_id=account.id
-                        )
 
-                if token is None:
-                    missing = missing_sidecar_cookies(load_session_auth("target"))
-                    last_error = (
-                        "no usable auth/_px3 sidecar "
-                        f"(missing {missing or 'jar'}). Run: python -m pokebot login target"
-                    )
-                    console.print(f"[yellow]{last_error}[/yellow]")
-                    task.status = TaskStatus.FAILED
-                    return TaskResult(
-                        task_id=task.id,
-                        retailer=self.retailer,
-                        sku=task.sku,
-                        success=False,
-                        status=TaskStatus.FAILED,
-                        message=last_error,
-                        account_id=account.id,
-                        attempts=attempt,
-                    )
+            if token is None:
+                missing = missing_sidecar_cookies(load_session_auth("target"))
+                last_error = (
+                    "no usable auth/_px3 sidecar "
+                    f"(missing {missing or 'jar'}). Run: python -m pokebot login target"
+                )
+                console.print(f"[yellow]{last_error}[/yellow]")
+                task.status = TaskStatus.FAILED
+                return TaskResult(
+                    task_id=task.id,
+                    retailer=self.retailer,
+                    sku=task.sku,
+                    success=False,
+                    status=TaskStatus.FAILED,
+                    message=last_error,
+                    account_id=account.id,
+                    attempts=attempt,
+                )
 
             task.status = TaskStatus.CHECKING_OUT
             if account.fingerprint is None:
@@ -304,15 +291,3 @@ class TargetPipeline:
             account_id=account.id,
             attempts=self.settings.max_attempts,
         )
-
-
-async def run_dry_run(product_url: str, *, sku: str = "TEST-SKU") -> TaskResult | None:
-    """Exercise the Target pipeline offline with a synthetic account+alert."""
-    settings = load_reseller_settings()
-    settings.dry_run = True
-    pipeline = TargetPipeline.build(settings)
-    if not pipeline.accounts.all(Retailer.TARGET):
-        pipeline.accounts.add(AccountStore.synthetic(Retailer.TARGET))
-
-    alert = RestockAlert(id=sku, sku=sku, store="target", url=product_url)
-    return await pipeline.handle_alert(alert)

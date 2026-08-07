@@ -28,16 +28,11 @@ def add_reseller_parser(subparsers: argparse._SubParsersAction) -> None:
         help="Units to add (default: 1 for manual runs)",
     )
     target.add_argument(
-        "--live",
-        action="store_true",
-        help="Disable dry-run and hit the network",
-    )
-    target.add_argument(
         "--preflight",
         action="store_true",
         help=(
-            "Live-validate ATC/checkout WITHOUT buying: stop before place_order. "
-            "Implies live network."
+            "Validate ATC/checkout WITHOUT buying: stop before place_order. "
+            "Still hits the live network."
         ),
     )
     target.set_defaults(func=run_reseller_target)
@@ -62,7 +57,7 @@ def _clean_target_url(url: str) -> str:
 
 
 async def run_reseller_target(args: argparse.Namespace) -> None:
-    from pokebot.reseller.pipeline import TargetPipeline, run_dry_run
+    from pokebot.reseller.pipeline import TargetPipeline
     from pokebot.reseller.settings import load_reseller_settings
     from pokebot.restockr.models import RestockAlert
 
@@ -83,37 +78,33 @@ async def run_reseller_target(args: argparse.Namespace) -> None:
     )
 
     preflight = getattr(args, "preflight", False)
-    if not args.live and not preflight:
-        console.print("[cyan]Running Target pipeline in dry-run mode[/cyan]")
-        result = await run_dry_run(url, sku=sku)
-    else:
-        if preflight:
-            console.print(
-                "[cyan]PREFLIGHT — live network, validates token + cart + checkout, "
-                "stops before placing the order (no purchase).[/cyan]"
-            )
-        else:
-            console.print("[yellow]LIVE mode — this can place a real order[/yellow]")
-        settings = load_reseller_settings()
-        settings.dry_run = False
-        if preflight:
-            settings.max_attempts = 1
-        pipeline = TargetPipeline.build(settings)
-        pipeline.checkout.preflight = preflight
-        if pipeline.ensure_default_account():
-            console.print(
-                "[dim]No reseller accounts YAML — using Chrome sidecar as default "
-                "account.[/dim]"
-            )
-        alert = RestockAlert(
-            id=sku,
-            sku=sku,
-            store="target",
-            url=url,
-            restock_url=raw_url or url,
-            stock_quantity=quantity,
+    if preflight:
+        console.print(
+            "[cyan]PREFLIGHT — live network, validates token + cart + checkout, "
+            "stops before placing the order (no purchase).[/cyan]"
         )
-        result = await pipeline.handle_alert(alert)
+    else:
+        console.print("[yellow]LIVE — this can place a real order[/yellow]")
+
+    settings = load_reseller_settings()
+    if preflight:
+        settings.max_attempts = 1
+    pipeline = TargetPipeline.build(settings)
+    pipeline.checkout.preflight = preflight
+    if pipeline.ensure_default_account():
+        console.print(
+            "[dim]No reseller accounts YAML — using Chrome sidecar as default "
+            "account.[/dim]"
+        )
+    alert = RestockAlert(
+        id=sku,
+        sku=sku,
+        store="target",
+        url=url,
+        restock_url=raw_url or url,
+        stock_quantity=quantity,
+    )
+    result = await pipeline.handle_alert(alert)
 
     if result is None:
         console.print("[red]No result[/red]")

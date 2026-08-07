@@ -49,35 +49,32 @@ class ResellerOrchestrator:
                 "+ data/sessions/target-auth.json sidecar.[/dim]"
             )
 
-        if not self.reseller_settings.dry_run:
-            ok, detail = check_target_auth_sidecar()
-            if ok:
-                console.print(f"[green]{detail}[/green]")
-            else:
+        ok, detail = check_target_auth_sidecar()
+        if ok:
+            console.print(f"[green]{detail}[/green]")
+        else:
+            console.print(
+                f"[red]Sidecar not ready:[/red] {detail}\n"
+                "  Run: [bold]python -m pokebot login target[/bold]"
+            )
+
+        from pokebot.reseller.target_credentials import load_target_credentials
+        from pokebot.reseller.target_login import ensure_target_login
+
+        if load_target_credentials() is not None:
+            console.print("[cyan]Ensuring Target commerce login…[/cyan]")
+            result = await ensure_target_login(
+                browser_settings=self.settings.playwright,
+                headless=False,
+            )
+            if not result.ok:
                 console.print(
-                    f"[red]Sidecar not ready:[/red] {detail}\n"
-                    "  Run: [bold]python -m pokebot login target[/bold]"
+                    "[yellow]Warning:[/yellow] Target not commerce-signed-in. "
+                    "Checkouts may fail until: "
+                    "python -m pokebot login target --auto"
                 )
 
-        if not self.reseller_settings.dry_run:
-            from pokebot.reseller.target_credentials import load_target_credentials
-            from pokebot.reseller.target_login import ensure_target_login
-
-            if load_target_credentials() is not None:
-                console.print("[cyan]Ensuring Target commerce login…[/cyan]")
-                result = await ensure_target_login(
-                    browser_settings=self.settings.playwright,
-                    headless=False,
-                )
-                if not result.ok:
-                    console.print(
-                        "[yellow]Warning:[/yellow] Target not commerce-signed-in. "
-                        "Live checkouts may fail until: "
-                        "python -m pokebot login target --auto"
-                    )
-
-        mode = "DRY-RUN" if self.reseller_settings.dry_run else "LIVE"
-        console.print(f"[bold]Reseller pipeline mode:[/bold] {mode}")
+        console.print("[bold]Reseller pipeline mode:[/bold] LIVE")
 
         listener = RestockRListener(
             self.settings.restockr.socket_url, self.client.token or ""

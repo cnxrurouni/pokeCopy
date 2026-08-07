@@ -34,7 +34,7 @@ Every outbound Target request dumps a redacted NDJSON line under `data/logs/rese
 |---------|------|
 | `login restockr` / `login target` | RestockR token; Chrome cookie export |
 | `doctor` | Arch + RestockR + sidecar completeness |
-| `reseller run` / `reseller target` | HTTP buy (live / preflight / dry-run) |
+| `reseller run` / `reseller target` | HTTP buy (live / `--preflight`) |
 | `open-alerts` | Listen and open URLs in everyday Chrome only |
 | `status` | Watchlist / session summary |
 

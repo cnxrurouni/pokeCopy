@@ -35,7 +35,7 @@ python -m pokebot login restockr
 python -m pokebot login target          # real Chrome; exports auth+_px3
 python -m pokebot doctor
 python -m pokebot reseller target --url "https://www.target.com/p/..." --preflight
-python -m pokebot reseller run          # LIVE if config/reseller.yaml dry_run: false
+python -m pokebot reseller run          # LIVE RestockR → HTTP checkout
 python -m pokebot open-alerts           # listen + open URLs in normal Chrome only
 ```
 
@@ -47,12 +47,12 @@ alignment with `reseller.curl_impersonate`, then hard-registered sidecar auth.
 ## Config
 
 - `config/settings.yaml` — RestockR + watchlist/retailer filters
-- `config/reseller.yaml` — `dry_run`, `curl_impersonate`, ATC abort thresholds
+- `config/reseller.yaml` — `curl_impersonate`, ATC abort thresholds
 - `config/reseller.capture.target.json` — captured Target API chain
 
 ## Gotchas
 
-- Reseller checkout places **real orders** when `dry_run: false` / `--live`.
+- Reseller checkout places **real orders**. Use `--preflight` to validate without buying.
 - Cookies from `login target` are cached in `data/sessions/target-auth.json` and reused for HTTP. Optional Chrome warm (`warm_cart_checkout`) is off by default — enabling it can briefly make Go-Proxy reject the same token (MI6 issuer 401).
 - `_px3` expires; re-run `login target` when ATC returns sustained 401 AUTH_DENIED.
 - Live `place_order` needs CVV when Target sets `is_cvv_required` on the saved card: `export TARGET_CVV=…` (Amex is 4 digits). Never commit CVV to config.

@@ -110,7 +110,6 @@ class TargetHttpCheckout(CheckoutClient):
     def __init__(
         self,
         *,
-        dry_run: bool = True,
         impersonate: str = "chrome146",
         capture_path: str | Path | None = None,
         preflight: bool = False,
@@ -127,7 +126,6 @@ class TargetHttpCheckout(CheckoutClient):
         warm_dwell_seconds: float = 3.0,
         identity: ClientIdentity | None = None,
     ) -> None:
-        self.dry_run = dry_run
         self.impersonate = impersonate
         self.capture_path = Path(capture_path) if capture_path else None
         self.preflight = preflight
@@ -178,13 +176,6 @@ class TargetHttpCheckout(CheckoutClient):
             fingerprint=getattr(ctx.account, "fingerprint", None),
             curl_impersonate=self.impersonate,
         )
-        if self.dry_run:
-            await asyncio.sleep(0)
-            return CheckoutOutcome(
-                success=True,
-                order_id=f"DRYRUN-{ctx.task.sku}",
-                message="dry-run: simulated order confirmation",
-            )
         return await self._place_order_live(ctx)
 
     def _merged_cookies(self, ctx: CheckoutContext) -> dict[str, str]:
@@ -573,7 +564,7 @@ class TargetHttpCheckout(CheckoutClient):
                     "Target requires CVV for saved card "
                     f"(payment_instruction_id={pi_id}; is_cvv_required=true). "
                     "Set env TARGET_CVV to your card security code (Amex=4 digits), "
-                    "then retry --live. CVV is not stored in git/config."
+                    "then retry. CVV is not stored in git/config."
                 ),
                 retryable=False,
             )

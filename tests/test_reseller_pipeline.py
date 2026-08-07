@@ -1,26 +1,13 @@
 from __future__ import annotations
 
 from pokebot.enums import Retailer
-from pokebot.reseller.models import TaskStatus
-from pokebot.reseller.pipeline import TargetPipeline, run_dry_run, token_from_sidecar
+from pokebot.reseller.pipeline import TargetPipeline, token_from_sidecar
 from pokebot.reseller.settings import ResellerSettings
 from pokebot.restockr.models import RestockAlert
 
 
-async def test_dry_run_places_order_end_to_end():
-    result = await run_dry_run(
-        "https://www.target.com/p/example/-/A-12345", sku="TEST-SKU"
-    )
-    assert result is not None
-    assert result.success is True
-    assert result.status == TaskStatus.PLACED
-    assert result.sku == "12345"
-    assert result.order_id == "DRYRUN-12345"
-
-
 def test_task_from_alert_resolves_tcin_from_url():
-    settings = ResellerSettings(dry_run=True)
-    pipeline = TargetPipeline.build(settings)
+    pipeline = TargetPipeline.build(ResellerSettings())
     alert = RestockAlert(
         id="x",
         sku="TEST-SKU",
@@ -39,8 +26,7 @@ def test_task_from_alert_resolves_tcin_from_url():
 
 
 def test_ensure_default_account_falls_back_to_session():
-    settings = ResellerSettings(dry_run=True)
-    pipeline = TargetPipeline.build(settings)
+    pipeline = TargetPipeline.build(ResellerSettings())
     injected = pipeline.ensure_default_account()
     assert injected is True
     accounts = pipeline.accounts.all(Retailer.TARGET)

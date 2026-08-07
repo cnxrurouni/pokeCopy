@@ -46,14 +46,12 @@ class TargetNativeEdgeHarvester(TokenHarvester):
     def __init__(
         self,
         *,
-        dry_run: bool = True,
         ttl_seconds: float = 300.0,
         browser_settings: PlaywrightSettings | None = None,
         interaction_seconds: float = 8.0,
         settle_seconds: float = 4.0,
         debug: bool = False,
     ) -> None:
-        self.dry_run = dry_run
         self.ttl_seconds = ttl_seconds
         self.browser_settings = browser_settings or PlaywrightSettings()
         self.interaction_seconds = interaction_seconds
@@ -69,23 +67,6 @@ class TargetNativeEdgeHarvester(TokenHarvester):
         self, ctx: HarvestContext, *, humanize: bool = True
     ) -> HarvestedToken | None:
         self.last_stop_reason = None
-        if self.dry_run:
-            await asyncio.sleep(0)
-            return HarvestedToken(
-                kind=self.kind,
-                retailer=self.retailer,
-                value="dry-run-px3-token",
-                cookies={
-                    "_px3": "dryrun-px3-token-value-000000",
-                    "_pxvid": "dryrun",
-                    "accessToken": "dryrun-access",
-                    "idToken": "dryrun-id",
-                    "login-session": "dryrun-login-session",
-                },
-                ttl_seconds=self.ttl_seconds,
-                account_id=ctx.account.id,
-                cart_primed=False,
-            )
         return await asyncio.to_thread(self._harvest_sync, ctx, humanize)
 
     def _profile_dir(self):

@@ -42,7 +42,6 @@ _CART_EMPTY = '{"cart_items":[]}'
 
 def _checkout(**kwargs) -> TargetHttpCheckout:
     defaults = dict(
-        dry_run=False,
         atc_spam_timeout_seconds=2.0,
         checkout_spam_timeout_seconds=2.0,
         atc_retry_delay_ms_min=0,
