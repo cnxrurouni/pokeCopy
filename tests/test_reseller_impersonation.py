@@ -14,8 +14,19 @@ def test_chrome_and_none_map_to_chromium():
     assert curl_impersonate_for_channel(None).startswith("chrome")
 
 
-def test_explicit_override_wins():
+def test_explicit_override_wins_when_available():
     assert curl_impersonate_for_channel("msedge", override="chrome120") == "chrome120"
+
+
+def test_missing_override_falls_back(monkeypatch):
+    from pokebot.reseller import impersonation
+
+    monkeypatch.setattr(
+        impersonation,
+        "_available_targets",
+        lambda: {"chrome136", "chrome131"},
+    )
+    assert curl_impersonate_for_channel("chrome", override="chrome146") == "chrome136"
 
 
 def test_firefox_channel_maps_to_firefox():

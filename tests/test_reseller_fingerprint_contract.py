@@ -10,7 +10,9 @@ def test_chrome_identity_default_channel_and_platform():
     ident = resolve_client_identity(None)
     assert ident.channel == "chrome"
     assert "Edg/" not in ident.user_agent
-    assert "Chrome/146" in ident.user_agent
+    major = ident.curl_impersonate.replace("chrome", "").rstrip("a")
+    assert major.isdigit()
+    assert f"Chrome/{major}" in ident.user_agent
     assert "Google Chrome" in ident.sec_ch_ua or "Chromium" in ident.sec_ch_ua
     assert ident.curl_impersonate.startswith("chrome")
     assert "user-agent" in ident.fingerprint_header_keys
@@ -45,10 +47,14 @@ def test_curl_override_and_fingerprint_ua():
     assert headers["sec-ch-ua-mobile"] == "?0"
 
 
-def test_pipeline_defaults_browser_atc_off():
+def test_pipeline_defaults_web_channel_browser_assist():
     from pokebot.reseller.settings import ResellerSettings
 
-    assert ResellerSettings().browser_atc_enabled is False
-    assert ResellerSettings().auth_denied_abort_after == 3
-    assert ResellerSettings().rate_limit_abort_after == 3
-    assert ResellerSettings().rate_limit_cooldown_seconds == 30.0
+    # Browser-assist ATC is the default for the web channel (hot SKUs).
+    assert ResellerSettings().browser_assist_atc is True
+    assert ResellerSettings().checkout_channel == "web"
+    assert ResellerSettings().auth_denied_abort_after == 0
+    assert ResellerSettings().atc_spam_timeout_seconds == 300.0
+    assert ResellerSettings().checkout_spam_timeout_seconds == 1200.0
+    assert ResellerSettings().rate_limit_abort_after == 0
+    assert ResellerSettings().rate_limit_cooldown_seconds == 60.0

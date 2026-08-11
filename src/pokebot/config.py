@@ -43,9 +43,21 @@ class AutobuySettings(BaseModel):
     retailers: list[str] = Field(default_factory=lambda: ["target"])
 
 
+class DiscordSettings(BaseModel):
+    """Discord channel → reseller checkout (bot token via env)."""
+
+    guild_id: str = ""
+    channel_id: str = ""
+    token_env: str = "DISCORD_BOT_TOKEN"
+    # Discord alerts are intentional channel signals — do not require RestockR watchlist.
+    watchlist_only: bool = False
+    open_in_chrome: bool = True
+
+
 class Settings(BaseModel):
     restockr: RestockRSettings = Field(default_factory=RestockRSettings)
     autobuy: AutobuySettings = Field(default_factory=AutobuySettings)
+    discord: DiscordSettings = Field(default_factory=DiscordSettings)
 
 
 def _load_yaml(path: Path) -> dict:

@@ -4,7 +4,9 @@ Context for AI agents working in this repository.
 
 ## What this project is
 
-PokeBot listens to [RestockR](https://www.restockr.app) for Target restocks and buys via **HTTP capture-replay** (`curl_cffi` TLS impersonation). Cookies (registered auth + PerimeterX `_px3`) come from a **real Chrome** login export — not Playwright.
+PokeBot listens to [RestockR](https://www.restockr.app) (and optionally Discord)
+for Target restocks and buys via **HTTP capture-replay** (`curl_cffi` TLS impersonation).
+Cookies (registered auth + PerimeterX `_px3`) come from a **real Chrome** login export — not Playwright.
 
 There is **no Playwright** in this codebase. Browser click-checkout was removed because automation browsers are easy for PerimeterX/HUMAN to flag.
 
@@ -23,19 +25,25 @@ Do not claim login/checkout state without a concrete check (`doctor`, logs under
 - `src/pokebot/reseller/checkout/target_http.py` — ATC/checkout over curl_cffi
 - `src/pokebot/reseller/fingerprint_contract.py` — UA / sec-ch-ua* pinned to curl_impersonate
 - `src/pokebot/reseller/http_telemetry.py` — NDJSON request/TLS dumps
-- `src/pokebot/reseller/pipeline.py` / `orchestrator.py` — RestockR → HTTP buy
+- `src/pokebot/reseller/pipeline.py` / `orchestrator.py` — RestockR/Discord → HTTP buy
+- `src/pokebot/discord_alerts/` — Discord channel listener → same `RestockAlert` path
 - `src/pokebot/alert_open.py` — optional: open product URL in everyday Chrome
 
 ## How to run
 
 ```bash
 pip install -e ".[dev]"
+# Optional Discord alerts:
+pip install -e ".[discord]"
 export RESTOCKR_USERNAME=... RESTOCKR_PASSWORD=...
+export DISCORD_BOT_TOKEN=...   # bot with Message Content Intent + read access
 python -m pokebot login restockr
 python -m pokebot login target          # real Chrome; exports auth+_px3
 python -m pokebot doctor
 python -m pokebot reseller target --url "https://www.target.com/p/..." --preflight
 python -m pokebot reseller run          # LIVE RestockR → HTTP checkout
+python -m pokebot reseller run --discord  # LIVE Discord channel → HTTP checkout
+python -m pokebot reseller run --source both
 python -m pokebot open-alerts           # listen + open URLs in normal Chrome only
 ```
 
@@ -46,7 +54,7 @@ alignment with `reseller.curl_impersonate`, then hard-registered sidecar auth.
 
 ## Config
 
-- `config/settings.yaml` — RestockR + watchlist/retailer filters
+- `config/settings.yaml` — RestockR + Discord guild/channel + watchlist/retailer filters
 - `config/reseller.yaml` — `curl_impersonate`, ATC abort thresholds
 - `config/reseller.capture.target.json` — captured Target API chain
 

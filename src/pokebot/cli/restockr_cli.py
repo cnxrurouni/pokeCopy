@@ -17,8 +17,11 @@ def add_login_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("login", help="Log in to RestockR or Target (Chrome export)")
     parser.add_argument(
         "target",
-        choices=["restockr", "target"],
-        help="restockr = API token; target = export auth+_px3 from real Chrome",
+        choices=["restockr", "target", "target-mobile"],
+        help=(
+            "restockr = API token; target = export auth+_px3 from real Chrome; "
+            "target-mobile = import iOS app tokens from a Proxyman HAR"
+        ),
     )
     parser.add_argument("--username", help="RestockR username (or export RESTOCKR_USERNAME)")
     parser.add_argument("--password", help="RestockR password (or export RESTOCKR_PASSWORD)")
@@ -26,6 +29,14 @@ def add_login_parser(subparsers: argparse._SubParsersAction) -> None:
         "--channel",
         default="chrome",
         help="Browser for Target login: chrome (default) or msedge",
+    )
+    parser.add_argument(
+        "--from-har",
+        default=None,
+        help=(
+            "For target-mobile: path to Proxyman HAR containing "
+            "gsp oauth_tokens login (default: data/captures/target-mobile/full.har)"
+        ),
     )
     parser.set_defaults(func=run_login)
 
@@ -90,6 +101,26 @@ async def run_login(args: argparse.Namespace) -> None:
         console.print(f"Token saved to data/restockr_token.json ({len(token)} chars)")
         return
 
+    if args.target == "target-mobile":
+        from pokebot.config import data_dir
+        from pokebot.doctor import decode_jwt_claims
+        from pokebot.mobile_auth import import_mobile_auth_from_har
+        from pokebot.session_auth import load_mobile_session_auth
+
+        har = getattr(args, "from_har", None) or (
+            data_dir() / "captures" / "target-mobile" / "full.har"
+        )
+        path = import_mobile_auth_from_har(har)
+        cookies = load_mobile_session_auth()
+        claims = decode_jwt_claims(cookies.get("accessToken") or "")
+        console.print(
+            f"[green]Target mobile auth imported[/green] — {path}\n"
+            f"  sut={claims.get('sut')} asl={claims.get('asl')} "
+            f"cli={claims.get('cli')} sco={claims.get('sco')}\n"
+            f"  Next: python -m pokebot doctor"
+        )
+        return
+
     from pokebot.chrome_login import login_target_chrome
 
     await login_target_chrome(channel=getattr(args, "channel", "chrome") or "chrome")
@@ -116,6 +147,7 @@ async def run_doctor(args: argparse.Namespace) -> None:
         check_architecture,
         check_http_fingerprint_ready,
         check_target_auth_sidecar,
+        check_target_mobile_auth_sidecar,
     )
     from pokebot.reseller.settings import load_reseller_settings
     from pokebot.restockr.client import RestockRClient
@@ -143,7 +175,7 @@ async def run_doctor(args: argparse.Namespace) -> None:
     console.print("\n[bold]HTTP fingerprint[/bold]")
     reseller = load_reseller_settings()
     fp_ok, fp_detail = check_http_fingerprint_ready(
-        curl_impersonate=reseller.curl_impersonate or "chrome146"
+        curl_impersonate=reseller.curl_impersonate
     )
     if fp_ok:
         console.print(f"  [green]{fp_detail}[/green]")
@@ -158,6 +190,17 @@ async def run_doctor(args: argparse.Namespace) -> None:
         console.print(
             f"  [red]{detail}[/red]\n"
             "  Fix: python -m pokebot login target"
+        )
+
+    console.print("\n[bold]Target mobile (iOS app) sidecar[/bold]")
+    mob_ok, mob_detail = check_target_mobile_auth_sidecar()
+    if mob_ok:
+        console.print(f"  [green]{mob_detail}[/green]")
+    else:
+        console.print(
+            f"  [red]{mob_detail}[/red]\n"
+            "  Fix: python -m pokebot login target-mobile "
+            "--from-har data/captures/target-mobile/full.har"
         )
 
 

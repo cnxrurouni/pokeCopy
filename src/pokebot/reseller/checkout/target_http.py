@@ -24,6 +24,62 @@ from pokebot.reseller.target_ids import (
 
 console = Console()
 
+# #region agent log
+_AGENT_DBG_PATH = Path(
+    "/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log"
+)
+
+
+def _agent_dbg(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """Append one NDJSON debug line (no secrets)."""
+    try:
+        payload = {
+            "sessionId": "bf9575",
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "timestamp": int(time.time() * 1000),
+        }
+        _AGENT_DBG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _AGENT_DBG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, default=str) + "\n")
+    except Exception:
+        pass
+
+
+def _cookie_lens(cookies: dict[str, str] | None) -> dict[str, int]:
+    return {k: len(v) for k, v in sorted((cookies or {}).items()) if v}
+
+
+def _jwt_safe_claims(access_token: str | None) -> dict[str, Any]:
+    if not access_token:
+        return {}
+    try:
+        from pokebot.doctor import decode_jwt_claims
+
+        claims = decode_jwt_claims(access_token) or {}
+        exp = claims.get("exp")
+        now = int(time.time())
+        return {
+            "iss": claims.get("iss"),
+            "sut": claims.get("sut"),
+            "asl": claims.get("asl"),
+            "sco": claims.get("sco"),
+            "exp_in_s": (int(exp) - now) if exp is not None else None,
+            "iat": claims.get("iat"),
+        }
+    except Exception as exc:
+        return {"decode_error": type(exc).__name__}
+
+
+# #endregion
+
 
 def _elapsed_seconds(elapsed: Any) -> float | None:
     """curl_cffi returns ``datetime.timedelta`` for ``Response.elapsed``."""
@@ -110,23 +166,27 @@ class TargetHttpCheckout(CheckoutClient):
     def __init__(
         self,
         *,
-        impersonate: str = "chrome146",
+        impersonate: str | None = None,
         capture_path: str | Path | None = None,
         preflight: bool = False,
-        atc_spam_timeout_seconds: float = 90.0,
-        checkout_spam_timeout_seconds: float = 120.0,
+        atc_spam_timeout_seconds: float = 300.0,
+        checkout_spam_timeout_seconds: float = 1200.0,
         atc_retry_delay_ms_min: int = 1000,
         atc_retry_delay_ms_max: int = 2000,
         spam_delay_ms_min: int = 1000,
         spam_delay_ms_max: int = 2000,
-        auth_denied_abort_after: int = 3,
-        rate_limit_abort_after: int = 3,
+        # 0 = never abort on AUTH_DENIED / 429 streak (keep until timeout/stock).
+        auth_denied_abort_after: int = 0,
+        rate_limit_abort_after: int = 0,
         rate_limit_cooldown_seconds: float = 30.0,
         warm_cart_checkout: bool = False,
         warm_dwell_seconds: float = 3.0,
+        browser_assist_atc: bool = True,
+        browser_assist_timeout_seconds: float = 120.0,
+        skip_atc: bool = False,
         identity: ClientIdentity | None = None,
     ) -> None:
-        self.impersonate = impersonate
+        self.impersonate = impersonate or "chrome"
         self.capture_path = Path(capture_path) if capture_path else None
         self.preflight = preflight
         self.atc_spam_timeout_seconds = atc_spam_timeout_seconds
@@ -137,16 +197,20 @@ class TargetHttpCheckout(CheckoutClient):
         )
         self.spam_delay_ms_min = max(0, spam_delay_ms_min)
         self.spam_delay_ms_max = max(self.spam_delay_ms_min, spam_delay_ms_max)
-        self.auth_denied_abort_after = max(1, auth_denied_abort_after)
-        self.rate_limit_abort_after = max(1, rate_limit_abort_after)
+        self.auth_denied_abort_after = max(0, int(auth_denied_abort_after))
+        self.rate_limit_abort_after = max(0, int(rate_limit_abort_after))
         self.rate_limit_cooldown_seconds = max(1.0, float(rate_limit_cooldown_seconds))
         self.warm_cart_checkout = warm_cart_checkout
         self.warm_dwell_seconds = max(0.5, float(warm_dwell_seconds))
+        self.browser_assist_atc = browser_assist_atc
+        self.browser_assist_timeout_seconds = max(
+            15.0, float(browser_assist_timeout_seconds)
+        )
+        self.skip_atc = bool(skip_atc)
         self._identity = identity or resolve_client_identity(
             "chrome", curl_impersonate_override=impersonate
         )
-        if identity is not None:
-            self.impersonate = identity.curl_impersonate
+        self.impersonate = self._identity.curl_impersonate
         self._telemetry = None
 
     def bind_identity(
@@ -167,7 +231,7 @@ class TargetHttpCheckout(CheckoutClient):
     def _headers_with_identity(self, base: dict[str, str] | None = None) -> dict[str, str]:
         headers = dict(base or _BASE_HEADERS)
         # Identity wins for UA / sec-ch-ua* / accept-language so sparse captures
-        # cannot strip Client Hints and leave TLS claiming chrome146 alone.
+        # cannot strip Client Hints and leave TLS claiming a different Chrome alone.
         headers.update(self._identity.browser_headers())
         return headers
 
@@ -307,7 +371,10 @@ class TargetHttpCheckout(CheckoutClient):
     ) -> str | None:
         """Return an error message if we should not hit the network yet."""
         tcin = variables.get("tcin")
-        if not is_plausible_tcin(str(tcin) if tcin is not None else None):
+        # from-cart mode discovers TCIN after the session opens; allow empty here.
+        if not self.skip_atc and not is_plausible_tcin(
+            str(tcin) if tcin is not None else None
+        ):
             return (
                 f"Refusing to call Target cart API: invalid TCIN {tcin!r}. "
                 "Pass a real product URL (…/A-<tcin>) — not a label like TEST-SKU."
@@ -358,6 +425,8 @@ class TargetHttpCheckout(CheckoutClient):
         for req in capture.ordered():
             if self.preflight and req.commits_order:
                 break
+            if self.skip_atc and req.name == "add_to_cart":
+                continue
             rendered = substitute(req.body or "", variables)
             if "{{tcin}}" in rendered or "{{quantity}}" in rendered:
                 return (
@@ -365,6 +434,78 @@ class TargetHttpCheckout(CheckoutClient):
                     f"after variable bind (tcin={tcin!r})."
                 )
         return None
+
+    def _fetch_cart_tcins(
+        self,
+        session,
+        *,
+        cookies: dict[str, str],
+        variables: dict[str, Any],
+    ) -> tuple[list[str] | None, str]:
+        """List cart TCINs.
+
+        Returns ``(tcins, detail)`` where:
+        - ``tcins`` is a list on HTTP 200 (possibly empty)
+        - ``tcins is None`` on 429 / 5xx / transport errors (inconclusive — retry)
+        """
+        jar = self._cookies_for_request(cookies)
+        headers = self._headers_with_identity()
+        headers["cookie"] = self._cookie_header(jar)
+        headers["referer"] = "https://www.target.com/cart"
+        access = jar.get("accessToken") or cookies.get("accessToken")
+        if access:
+            headers["authorization"] = f"Bearer {access}"
+        try:
+            resp = session.request("GET", _CART_GET_URL, headers=headers)
+            text = resp.text or ""
+            try:
+                data = resp.json() if text else {}
+            except Exception:
+                data = {}
+        except Exception as exc:
+            return None, f"cart list failed: {exc}"
+        if resp.status_code == 429 or resp.status_code >= 500:
+            return None, f"cart list HTTP {resp.status_code}: {text[:180]!r}"
+        if resp.status_code != 200:
+            return None, f"cart list HTTP {resp.status_code}: {text[:180]!r}"
+        tcins = self._parse_cart_tcins(data if isinstance(data, dict) else {})
+        return tcins, f"cart items={tcins or '[]'}"
+
+    def _discover_cart_for_checkout(
+        self,
+        session,
+        *,
+        cookies: dict[str, str],
+        variables: dict[str, Any],
+        timeout_s: float | None = None,
+    ) -> tuple[list[str] | None, str]:
+        """Poll cart until HTTP 200 or timeout. 429/flakes do not mean empty."""
+        deadline = time.monotonic() + (
+            self.checkout_spam_timeout_seconds if timeout_s is None else timeout_s
+        )
+        attempt = 0
+        last_detail = "no cart polls"
+        while time.monotonic() < deadline:
+            attempt += 1
+            tcins, detail = self._fetch_cart_tcins(
+                session, cookies=cookies, variables=variables
+            )
+            last_detail = detail
+            if tcins is not None:
+                return tcins, detail
+            console.print(
+                f"[dim]FROM CART cart list #{attempt}: {detail} — retry "
+                f"(not treating as empty)…[/dim]"
+            )
+            if "429" in detail:
+                # Same as ATC: short jitter, no long Retry-After sleep.
+                self._spam_sleep(
+                    delay_ms_min=self.atc_retry_delay_ms_min,
+                    delay_ms_max=self.atc_retry_delay_ms_max,
+                )
+            else:
+                self._spam_sleep()
+        return None, f"timed out listing cart after {attempt} tries — {last_detail}"
 
     def _request_headers(
         self,
@@ -419,6 +560,28 @@ class TargetHttpCheckout(CheckoutClient):
                 tcins.append(str(tcin))
         return tcins
 
+    @staticmethod
+    def _parse_cart_tcin_qty(payload: Any, tcin: str) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        items = payload.get("cart_items")
+        if items is None and isinstance(payload.get("cart"), dict):
+            items = payload["cart"].get("cart_items")
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            item_tcin = item.get("tcin") or (item.get("item") or {}).get("tcin")
+            if str(item_tcin) != str(tcin):
+                continue
+            qty = item.get("quantity")
+            if qty is None and isinstance(item.get("item"), dict):
+                qty = item["item"].get("quantity")
+            try:
+                return int(qty) if qty is not None else None
+            except (TypeError, ValueError):
+                return None
+        return None
+
     def _verify_cart_has_tcin(
         self,
         session,
@@ -462,6 +625,7 @@ class TargetHttpCheckout(CheckoutClient):
         except Exception:
             data = None
         tcins = self._parse_cart_tcins(data)
+        cart_qty = self._parse_cart_tcin_qty(data, tcin)
         ok = resp.status_code == 200 and tcin in tcins
         if self._telemetry is not None:
             elapsed = getattr(resp, "elapsed", None)
@@ -494,8 +658,33 @@ class TargetHttpCheckout(CheckoutClient):
         if resp.status_code != 200:
             return False, f"cart GET HTTP {resp.status_code}: {text[:180]!r}"
         if tcin in tcins:
-            return True, f"cart contains tcin={tcin} (items={tcins})"
+            # #region agent log
+            _agent_dbg(
+                "Q2",
+                "target_http.py:_verify_cart_has_tcin",
+                "cart_has_tcin",
+                {"tcin": tcin, "cart_qty": cart_qty, "items": tcins[:8]},
+            )
+            # #endregion
+            qty_bit = f" qty={cart_qty}" if cart_qty is not None else ""
+            return True, f"cart contains tcin={tcin}{qty_bit} (items={tcins})"
         return False, f"cart missing tcin={tcin} (items={tcins or '[]'})"
+
+    @staticmethod
+    def _cart_tcin_confirmed_absent(present: bool, detail: str) -> bool:
+        """True only when a successful cart read proves the TCIN is gone.
+
+        Timeouts / 429 / 5xx must NOT count as empty — keep checkout-spamming.
+        """
+        if present:
+            return False
+        low = (detail or "").lower()
+        if "missing tcin=" not in low:
+            return False
+        # Defensive: missing-tcin messages are only emitted after HTTP 200.
+        if "http 429" in low or "http 5" in low or "request failed" in low:
+            return False
+        return True
 
     def _auth_headers(self, cookies: dict[str, str], *, referer: str) -> dict[str, str]:
         jar = self._cookies_for_request(cookies)
@@ -813,6 +1002,60 @@ class TargetHttpCheckout(CheckoutClient):
             error_key = parsed.get("errorKey") or parsed.get("error_key")
             error_code = parsed.get("errorCode") or parsed.get("error_code")
 
+        # #region agent log
+        if req.name == "add_to_cart" or resp.status_code in (401, 403, 429):
+            body_keys: list[str] = []
+            if body:
+                with contextlib.suppress(Exception):
+                    parsed_body = json.loads(body)
+                    if isinstance(parsed_body, dict):
+                        body_keys = sorted(parsed_body.keys())
+            header_keys = sorted(k.lower() for k in headers)
+            _agent_dbg(
+                "H3",
+                "target_http.py:_fire_request",
+                "http_response",
+                {
+                    "step": req.name,
+                    "attempt": attempt,
+                    "phase": phase,
+                    "tcin": str(variables.get("tcin") or ""),
+                    "method": req.method,
+                    "status": resp.status_code,
+                    "error_key": error_key,
+                    "error_code": error_code,
+                    "auth_passed": not (
+                        resp.status_code in (401, 403)
+                        or error_key == "_ERR_AUTH_DENIED"
+                    ),
+                    "url_host_path": url.split("?", 1)[0],
+                    "has_query_key": "key=" in url,
+                    "impersonate": self.impersonate,
+                    "ua_snip": (headers.get("user-agent") or "")[:80],
+                    "sec_ch_ua": headers.get("sec-ch-ua"),
+                    "sec_ch_ua_platform": headers.get("sec-ch-ua-platform"),
+                    "referer_snip": (headers.get("referer") or "")[:120],
+                    "has_authorization": "authorization" in {k.lower() for k in headers},
+                    "auth_scheme": (
+                        "bearer"
+                        if str(headers.get("authorization") or "")
+                        .lower()
+                        .startswith("bearer ")
+                        else None
+                    ),
+                    "header_keys": header_keys,
+                    "cookie_names_sent": sorted(jar.keys()),
+                    "cookie_lens": _cookie_lens(jar),
+                    "body_keys": body_keys,
+                    "body_len": len(body or ""),
+                    "response_snip": (text or "")[:240],
+                    "resp_header_keys": sorted(k.lower() for k in resp_headers),
+                    "retry_after": resp_headers.get("Retry-After")
+                    or resp_headers.get("retry-after"),
+                },
+            )
+        # #endregion
+
         if self._telemetry is not None:
             elapsed = getattr(resp, "elapsed", None)
             infos = getattr(resp, "infos", None) or {}
@@ -884,6 +1127,7 @@ class TargetHttpCheckout(CheckoutClient):
         *,
         timeout_s: float,
         require_cart_tcin: str | None = None,
+        stop_if_cart_missing_tcin: str | None = None,
         label: str | None = None,
         delay_ms_min: int | None = None,
         delay_ms_max: int | None = None,
@@ -896,6 +1140,7 @@ class TargetHttpCheckout(CheckoutClient):
         tcin = str(variables.get("tcin") or "")
         auth_denied_streak = 0
         rate_limit_streak = 0
+        watch_tcin = (stop_if_cart_missing_tcin or "").strip() or None
 
         while time.monotonic() < deadline:
             attempt += 1
@@ -911,11 +1156,28 @@ class TargetHttpCheckout(CheckoutClient):
             except Exception as exc:
                 last_detail = f"{name} attempt {attempt}: request error {exc}"
                 console.print(f"[dim]  {last_detail}[/dim]")
+                gone = self._checkout_stop_if_cart_gone(
+                    session,
+                    cookies=cookies,
+                    variables=variables,
+                    tcin=watch_tcin,
+                    attempt=attempt,
+                    step=name,
+                )
+                if gone is not None:
+                    return gone
                 self._spam_sleep(delay_ms_min=delay_ms_min, delay_ms_max=delay_ms_max)
                 continue
 
             short = text[:120]
-            if attempt == 1 or attempt % 10 == 0 or self._status_ok(req, status):
+            # Always surface auth/rate-limit attempts (retries used to look like a single try).
+            if (
+                attempt == 1
+                or attempt % 10 == 0
+                or self._status_ok(req, status)
+                or status in (401, 403, 429)
+                or "auth_denied" in (text or "").lower()
+            ):
                 console.print(f"[dim]HTTP {req.method} {name} #{attempt} → {status} {short!r}[/dim]")
 
             low = (text or "").lower()
@@ -942,30 +1204,62 @@ class TargetHttpCheckout(CheckoutClient):
                     retryable=True,
                 )
 
-            if auth_denied_streak >= self.auth_denied_abort_after:
+            if (
+                self.auth_denied_abort_after > 0
+                and auth_denied_streak >= self.auth_denied_abort_after
+            ):
                 return CheckoutOutcome(
                     False,
                     message=(
-                        f"{name}: aborting after {auth_denied_streak} consecutive "
-                        f"AUTH_DENIED/401 (tcin={tcin}) — refresh sidecar: "
-                        "python -m pokebot login target"
+                        f"{name}: AUTH_DENIED/401 x{auth_denied_streak} "
+                        f"(tcin={tcin}) — Target/PX risk-gated this HTTP ATC. "
+                        "Same session can still ATC other SKUs; re-login will not "
+                        "clear a hot-SKU gate. Use browser assist (everyday Chrome) "
+                        "or buy that TCIN in the browser, then retry checkout."
                     ),
                     retryable=False,
                 )
             if status == 429:
-                if rate_limit_streak >= self.rate_limit_abort_after:
+                # Cool down and keep trying until the step timeout. Hot drops
+                # rate-limit for minutes; aborting on the first 429 wastes the window.
+                if (
+                    self.rate_limit_abort_after > 0
+                    and rate_limit_streak >= self.rate_limit_abort_after
+                ):
                     return CheckoutOutcome(
                         False,
                         message=(
-                            f"{name}: HTTP 429 rate-limited {rate_limit_streak} times "
-                            f"(tcin={tcin}) — stopping. Cool down longer, then retry."
+                            f"{name}: HTTP 429 rate-limited (tcin={tcin}, "
+                            f"streak={rate_limit_streak}) — stopping."
                         ),
                         retryable=False,
                     )
-                waited = self._rate_limit_cooldown(
-                    response_headers=resp_headers, label=name
+                # ATC: skip Retry-After / 60s cooldown — just use the paced ATC delay.
+                if req.name == "add_to_cart":
+                    console.print(
+                        f"[dim]HTTP 429 on {name} — retry in "
+                        f"{(delay_ms_min or self.atc_retry_delay_ms_min)}-"
+                        f"{(delay_ms_max or self.atc_retry_delay_ms_max)}ms "
+                        "(no cooldown)…[/dim]"
+                    )
+                    self._spam_sleep(
+                        delay_ms_min=delay_ms_min, delay_ms_max=delay_ms_max
+                    )
+                else:
+                    waited = self._rate_limit_cooldown(
+                        response_headers=resp_headers, label=name
+                    )
+                    deadline += waited
+                gone = self._checkout_stop_if_cart_gone(
+                    session,
+                    cookies=cookies,
+                    variables=variables,
+                    tcin=watch_tcin,
+                    attempt=attempt,
+                    step=name,
                 )
-                deadline += waited
+                if gone is not None:
+                    return gone
                 continue
 
             stock_fail = self._atc_stock_failure(req, status, text, parsed)
@@ -989,6 +1283,18 @@ class TargetHttpCheckout(CheckoutClient):
                         "in the warm Chrome window finish sign-in on /checkout "
                         "(or re-run: python -m pokebot login target), then retry."
                     )
+                # Inventory fatals on checkout steps: confirm cart before giving up.
+                if req.name != "add_to_cart" and watch_tcin:
+                    gone = self._checkout_stop_if_cart_gone(
+                        session,
+                        cookies=cookies,
+                        variables=variables,
+                        tcin=watch_tcin,
+                        attempt=attempt,
+                        step=name,
+                    )
+                    if gone is not None:
+                        return gone
                 return CheckoutOutcome(
                     False,
                     message=(
@@ -1017,9 +1323,12 @@ class TargetHttpCheckout(CheckoutClient):
                                 f"[green]ATC ok[/green] after {attempt} tries — {detail}"
                             )
                             return None
-                        if "HTTP 429" in detail:
+                        if "HTTP 429" in detail or "http 429" in detail.lower():
                             rate_limit_streak += 1
-                            if rate_limit_streak >= self.rate_limit_abort_after:
+                            if (
+                                self.rate_limit_abort_after > 0
+                                and rate_limit_streak >= self.rate_limit_abort_after
+                            ):
                                 return CheckoutOutcome(
                                     False,
                                     message=(
@@ -1056,17 +1365,209 @@ class TargetHttpCheckout(CheckoutClient):
                         f"{name} #{attempt}: HTTP {status} but missing "
                         f"{req.success_contains!r}"
                     )
+                    gone = self._checkout_stop_if_cart_gone(
+                        session,
+                        cookies=cookies,
+                        variables=variables,
+                        tcin=watch_tcin,
+                        attempt=attempt,
+                        step=name,
+                    )
+                    if gone is not None:
+                        return gone
                     self._spam_sleep(delay_ms_min=delay_ms_min, delay_ms_max=delay_ms_max)
                     continue
                 console.print(f"[green]{name} ok[/green] after {attempt} tries ({status})")
                 return None
 
             last_detail = f"{name} #{attempt}: HTTP {status} — {short!r}"
+            gone = self._checkout_stop_if_cart_gone(
+                session,
+                cookies=cookies,
+                variables=variables,
+                tcin=watch_tcin,
+                attempt=attempt,
+                step=name,
+            )
+            if gone is not None:
+                return gone
             self._spam_sleep(delay_ms_min=delay_ms_min, delay_ms_max=delay_ms_max)
 
         return CheckoutOutcome(
             False,
             message=f"{name}: timed out after {attempt} tries ({timeout_s:.0f}s) — {last_detail}",
+            retryable=True,
+        )
+
+    def _checkout_stop_if_cart_gone(
+        self,
+        session,
+        *,
+        cookies: dict[str, str],
+        variables: dict[str, Any],
+        tcin: str | None,
+        attempt: int,
+        step: str,
+    ) -> CheckoutOutcome | None:
+        """If cart GET 200 shows TCIN absent, stop checkout spam. Else None."""
+        if not tcin:
+            return None
+        present, detail = self._verify_cart_has_tcin(
+            session,
+            tcin=tcin,
+            cookies=cookies,
+            variables=variables,
+            attempt=attempt,
+        )
+        if self._cart_tcin_confirmed_absent(present, detail):
+            console.print(
+                f"[yellow]{step}[/yellow] — cart no longer has tcin={tcin} ({detail})"
+            )
+            return CheckoutOutcome(
+                False,
+                message=(
+                    f"{step}: stopped — Target removed tcin={tcin} from cart "
+                    f"(stock gone). {detail}"
+                ),
+                retryable=False,
+            )
+        if not present:
+            console.print(
+                f"[dim]  cart check inconclusive ({detail}) — keep checkout spam[/dim]"
+            )
+        return None
+
+    def _spam_place_order(
+        self,
+        session,
+        req: CapturedRequest,
+        variables: dict[str, Any],
+        cookies: dict[str, str],
+        *,
+        timeout_s: float,
+    ) -> CheckoutOutcome | None:
+        """Retry place_order until success, cart loses TCIN, hard fatal, or timeout.
+
+        Ambiguous success responses (HTTP OK but missing order marker) never retry —
+        that could double-charge. Cart GET flakes do not count as empty.
+        """
+        name = req.name
+        tcin = str(variables.get("tcin") or "")
+        deadline = time.monotonic() + timeout_s
+        attempt = 0
+        last_detail = "no attempts"
+
+        while time.monotonic() < deadline:
+            attempt += 1
+            try:
+                status, text, parsed, resp_headers = self._fire_request(
+                    session,
+                    req,
+                    variables,
+                    cookies,
+                    attempt=attempt,
+                    phase=name,
+                )
+            except Exception as exc:
+                last_detail = f"request error {exc}"
+                console.print(f"[dim]HTTP {req.method} {name} #{attempt} → error {exc}[/dim]")
+                gone = self._checkout_stop_if_cart_gone(
+                    session,
+                    cookies=cookies,
+                    variables=variables,
+                    tcin=tcin or None,
+                    attempt=attempt,
+                    step=name,
+                )
+                if gone is not None:
+                    return gone
+                self._spam_sleep()
+                continue
+
+            short = (text or "")[:120]
+            console.print(f"[dim]HTTP {req.method} {name} #{attempt} → {status} {short!r}[/dim]")
+            last_detail = f"HTTP {status} body={short!r}"
+            low = (text or "").lower()
+
+            if status == 429:
+                waited = self._rate_limit_cooldown(
+                    response_headers=resp_headers, label=name
+                )
+                deadline += waited
+                gone = self._checkout_stop_if_cart_gone(
+                    session,
+                    cookies=cookies,
+                    variables=variables,
+                    tcin=tcin or None,
+                    attempt=attempt,
+                    step=name,
+                )
+                if gone is not None:
+                    return gone
+                continue
+
+            if status == 401 and "mi6" in low and "token issuer" in low:
+                return CheckoutOutcome(
+                    False,
+                    message=(
+                        f"{name}: Go-Proxy rejected MI6 token issuer (tcin={tcin}). "
+                        "Not retrying place_order."
+                    ),
+                    retryable=False,
+                )
+
+            # CVV / guest-status fatals will not clear by mashing.
+            if "missing_credit_card_cvv" in low or "missing cvv" in low:
+                return CheckoutOutcome(
+                    False,
+                    message=(
+                        f"{name}: fatal HTTP {status} (tcin={tcin}) — body={short!r}"
+                    ),
+                    retryable=False,
+                )
+            if "invalid_guest_status" in low or "guest is not registered" in low:
+                return CheckoutOutcome(
+                    False,
+                    message=(
+                        f"{name}: fatal HTTP {status} (tcin={tcin}) — body={short!r}"
+                    ),
+                    retryable=False,
+                )
+
+            if self._status_ok(req, status):
+                if req.success_contains is not None and req.success_contains not in text:
+                    return CheckoutOutcome(
+                        False,
+                        message=(
+                            f"{name}: HTTP {status} but missing "
+                            f"{req.success_contains!r} (tcin={tcin}) — "
+                            f"ambiguous commit response, not re-POSTing. body={short!r}"
+                        ),
+                        retryable=False,
+                    )
+                self._apply_extract(req, parsed, variables)
+                console.print(f"[green]{name} ok[/green] after {attempt} tries ({status})")
+                return None
+
+            # Failed place — check if Target yanked the item; else keep spamming.
+            gone = self._checkout_stop_if_cart_gone(
+                session,
+                cookies=cookies,
+                variables=variables,
+                tcin=tcin or None,
+                attempt=attempt,
+                step=name,
+            )
+            if gone is not None:
+                return gone
+            self._spam_sleep()
+
+        return CheckoutOutcome(
+            False,
+            message=(
+                f"{name}: timed out after {attempt} tries ({timeout_s:.0f}s) — "
+                f"{last_detail}"
+            ),
             retryable=True,
         )
 
@@ -1079,7 +1580,8 @@ class TargetHttpCheckout(CheckoutClient):
     ) -> CheckoutOutcome | None:
         """Fire place_order at most twice (second only after 429 cooldown).
 
-        Never spam-retries a money commit — duplicate orders are worse than a miss.
+        Kept for tests / callers that want a short commit; live chain uses
+        ``_spam_place_order``.
         """
         name = req.name
         tcin = str(variables.get("tcin") or "")
@@ -1177,6 +1679,236 @@ class TargetHttpCheckout(CheckoutClient):
             retryable=False,
         )
 
+    async def _assist_atc_via_system_chrome(
+        self,
+        session,
+        *,
+        tcin: str,
+        cookies: dict[str, str],
+        variables: dict[str, Any],
+        reason: str = "primary",
+    ) -> CheckoutOutcome | None:
+        """Open everyday Chrome (no bot profile/CDP) and poll cart for TCIN.
+
+        Hot SKUs often AUTH_DENIED on curl_cffi while the same account can ATC in
+        a real browser. Returns None on success (item in cart); CheckoutOutcome on
+        failure. Does not touch the bot Chrome profile.
+        """
+        from pokebot.platform_util import (
+            click_target_atc_in_system_chrome,
+            open_url_in_system_chrome,
+        )
+
+        product_url = str(
+            variables.get("product_url")
+            or resolve_target_product_url(None, tcin=tcin)
+            or f"https://www.target.com/p/-/A-{tcin}"
+        )
+        timeout_s = self.browser_assist_timeout_seconds
+        # #region agent log
+        _agent_dbg(
+            "H10",
+            "target_http.py:_assist_atc_via_system_chrome",
+            "assist_start",
+            {
+                "tcin": tcin,
+                "timeout_s": timeout_s,
+                "reason": reason,
+                "product_url_snip": product_url[:120],
+            },
+        )
+        # #endregion
+        why = (
+            "HTTP ATC skipped (browser-first)"
+            if reason == "primary"
+            else "HTTP ATC AUTH_DENIED"
+        )
+        console.print(
+            f"[cyan]Browser ATC[/cyan] — {why}; opening everyday Chrome "
+            f"(not bot profile) for tcin={tcin}.\n"
+            "  Auto-clicks [bold]Add to cart[/bold] if Chrome allows AppleScript JS;\n"
+            "  otherwise click it yourself (same Target account). "
+            f"Polling cart up to {timeout_s:.0f}s.\n"
+            f"  {product_url}"
+        )
+        try:
+            await asyncio.to_thread(open_url_in_system_chrome, product_url)
+        except Exception as exc:
+            # #region agent log
+            _agent_dbg(
+                "H10",
+                "target_http.py:_assist_atc_via_system_chrome",
+                "assist_open_failed",
+                {"error": type(exc).__name__, "detail": str(exc)[:160]},
+            )
+            # #endregion
+            return CheckoutOutcome(
+                False,
+                message=(
+                    f"add_to_cart: browser ATC failed to open system Chrome "
+                    f"({exc}). Open {product_url} yourself, Add to cart, then retry."
+                ),
+                retryable=True,
+            )
+
+        # Target: always prefer Qty=2 on the PDP when the UI offers it.
+        browser_qty = 2
+        # Let the PDP render, then try AppleScript click (no bot CDP).
+        await asyncio.sleep(4.0)
+        clicked, click_detail = await asyncio.to_thread(
+            click_target_atc_in_system_chrome, tcin=tcin, quantity=browser_qty
+        )
+        # #region agent log
+        _agent_dbg(
+            "Q1",
+            "target_http.py:_assist_atc_via_system_chrome",
+            "assist_click",
+            {
+                "clicked": clicked,
+                "browser_qty": browser_qty,
+                "detail": click_detail[:240],
+            },
+        )
+        # #endregion
+        if clicked:
+            console.print(f"[green]Auto-clicked Add to cart[/green] — {click_detail}")
+            await asyncio.sleep(2.0)
+        else:
+            inactive = (
+                "inactive" in click_detail.lower()
+                or "oos" in click_detail.lower()
+                or "sold out" in click_detail.lower()
+                or "not clickable" in click_detail.lower()
+            )
+            console.print(
+                f"[yellow]Auto-click unavailable[/yellow] — {click_detail}"
+            )
+            if inactive:
+                # Don't burn 120s polling when the PDP says sold out / disabled.
+                return CheckoutOutcome(
+                    False,
+                    message=(
+                        f"add_to_cart: browser ATC button inactive/OOS "
+                        f"(tcin={tcin}) — {click_detail}"
+                    ),
+                    retryable=True,
+                )
+            console.print(
+                "  If the button is active, click [bold]Add to cart[/bold] "
+                "manually — polling cart…"
+            )
+
+        deadline = time.monotonic() + timeout_s
+        attempt = 0
+        last_detail = "not polled"
+        rate_limit_streak = 0
+        while time.monotonic() < deadline:
+            attempt += 1
+            ok, detail = await asyncio.to_thread(
+                self._verify_cart_has_tcin,
+                session,
+                tcin=tcin,
+                cookies=cookies,
+                variables=variables,
+                attempt=attempt,
+            )
+            last_detail = detail
+            if ok:
+                console.print(f"[green]Browser assist ATC ok[/green] — {detail}")
+                # Dismiss the "Added to cart" flyout so Chrome doesn't look stuck
+                # while HTTP checkout continues.
+                from pokebot.platform_util import dismiss_target_added_to_cart_drawer
+
+                dismissed, dismiss_detail = await asyncio.to_thread(
+                    dismiss_target_added_to_cart_drawer
+                )
+                # #region agent log
+                _agent_dbg(
+                    "H10",
+                    "target_http.py:_assist_atc_via_system_chrome",
+                    "assist_success",
+                    {
+                        "tcin": tcin,
+                        "attempt": attempt,
+                        "detail": detail[:200],
+                        "drawer_dismissed": dismissed,
+                        "dismiss_detail": dismiss_detail[:120],
+                    },
+                )
+                # #endregion
+                if dismissed:
+                    console.print(
+                        f"[dim]Dismissed Added-to-cart drawer — {dismiss_detail}[/dim]"
+                    )
+                console.print(
+                    "[dim]Continuing HTTP checkout/pre_checkout "
+                    "(Chrome drawer can be ignored)…[/dim]"
+                )
+                return None
+            if "HTTP 429" in detail or "RATE_LIMIT" in detail.upper():
+                rate_limit_streak += 1
+                if rate_limit_streak >= 3:
+                    return CheckoutOutcome(
+                        False,
+                        message=(
+                            f"add_to_cart: cart poll rate-limited while waiting for "
+                            f"browser ATC (tcin={tcin}) — {detail}. Cool down 1–2 min."
+                        ),
+                        retryable=True,
+                    )
+                console.print(f"[dim]  cart poll #{attempt}: {detail} — backing off[/dim]")
+                await asyncio.sleep(8.0)
+                continue
+            rate_limit_streak = 0
+            # Retry click a couple times if still missing (button may load late).
+            if attempt in (3, 6):
+                # Re-open PDP so we don't click a random /cart tab.
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(open_url_in_system_chrome, product_url)
+                    await asyncio.sleep(3.0)
+                clicked2, detail2 = await asyncio.to_thread(
+                    click_target_atc_in_system_chrome,
+                    tcin=tcin,
+                    quantity=browser_qty,
+                )
+                if clicked2:
+                    clicked = True
+                    console.print(f"[green]Auto-clicked Add to cart[/green] — {detail2}")
+                    await asyncio.sleep(2.0)
+                elif (
+                    "inactive" in detail2.lower()
+                    or "oos" in detail2.lower()
+                    or "sold out" in detail2.lower()
+                ):
+                    return CheckoutOutcome(
+                        False,
+                        message=(
+                            f"add_to_cart: browser ATC button inactive/OOS "
+                            f"(tcin={tcin}) — {detail2}"
+                        ),
+                        retryable=True,
+                    )
+            console.print(f"[dim]  cart poll #{attempt}: {detail}[/dim]")
+            await asyncio.sleep(2.5)
+
+        # #region agent log
+        _agent_dbg(
+            "H10",
+            "target_http.py:_assist_atc_via_system_chrome",
+            "assist_timeout",
+            {"tcin": tcin, "attempts": attempt, "detail": (last_detail or "")[:200]},
+        )
+        # #endregion
+        return CheckoutOutcome(
+            False,
+            message=(
+                f"add_to_cart: browser ATC timed out after "
+                f"{timeout_s:.0f}s (tcin={tcin}) — {last_detail}. "
+                "Use the same Target account in everyday Chrome, Add to cart, retry."
+            ),
+            retryable=True,
+        )
+
     async def _run_chain(
         self,
         session,
@@ -1192,12 +1924,61 @@ class TargetHttpCheckout(CheckoutClient):
         last_message: str | None = None
 
         console.print(
-            f"[cyan]ATC[/cyan] for tcin={tcin} qty={variables.get('quantity')} "
-            f"(timeout {self.atc_spam_timeout_seconds:.0f}s, "
-            f"retry {self.atc_retry_delay_ms_min}-{self.atc_retry_delay_ms_max}ms)…"
+            (
+                f"[cyan]FROM CART[/cyan] — skip ATC; checkout tcin={tcin} "
+                f"(timeout {self.checkout_spam_timeout_seconds:.0f}s)…"
+            )
+            if self.skip_atc
+            else (
+                f"[cyan]ATC[/cyan] for tcin={tcin} qty={variables.get('quantity')} "
+                + (
+                    f"(browser-first, poll up to {self.browser_assist_timeout_seconds:.0f}s)…"
+                    if self.browser_assist_atc
+                    else (
+                        f"(timeout {self.atc_spam_timeout_seconds:.0f}s, "
+                        f"retry {self.atc_retry_delay_ms_min}-{self.atc_retry_delay_ms_max}ms)…"
+                    )
+                )
+            )
         )
 
         for req in capture.ordered():
+            # Hot SKUs often get AUTH_DENIED on HTTP ATC while the same item is
+            # already in-cart from a browser add. Skip re-ATC to avoid burning PX.
+            if req.name == "add_to_cart":
+                if self.skip_atc:
+                    console.print(
+                        "[green]ATC skipped[/green] — --from-cart (use items already in cart)"
+                    )
+                    completed.append("add_to_cart(skipped:from_cart)")
+                    continue
+                if tcin:
+                    already, already_detail = self._verify_cart_has_tcin(
+                        session,
+                        tcin=tcin,
+                        cookies=cookies,
+                        variables=variables,
+                        attempt=0,
+                    )
+                    # #region agent log
+                    _agent_dbg(
+                        "H6",
+                        "target_http.py:_run_chain",
+                        "pre_atc_cart_check",
+                        {
+                            "tcin": tcin,
+                            "already_in_cart": already,
+                            "detail": (already_detail or "")[:200],
+                        },
+                    )
+                    # #endregion
+                    if already:
+                        console.print(
+                            f"[green]ATC skipped[/green] — already in cart ({already_detail})"
+                        )
+                        completed.append("add_to_cart(skipped:already_in_cart)")
+                        continue
+
             if self.preflight and req.commits_order:
                 ok, detail = self._verify_cart_has_tcin(
                     session,
@@ -1206,7 +1987,30 @@ class TargetHttpCheckout(CheckoutClient):
                     variables=variables,
                     attempt=1,
                 )
-                if not ok:
+                # Hot SKUs often 429 the final cart GET even after checkout +
+                # pre_checkout already succeeded with the item in cart.
+                rate_limited = (
+                    not ok
+                    and ("HTTP 429" in detail or "RATE_LIMIT" in detail.upper())
+                    and any(s.startswith("add_to_cart") for s in completed)
+                    and any(s.startswith("checkout") for s in completed)
+                    and any(s.startswith("pre_checkout") for s in completed)
+                )
+                # #region agent log
+                _agent_dbg(
+                    "H11",
+                    "target_http.py:_run_chain",
+                    "preflight_final_cart",
+                    {
+                        "tcin": tcin,
+                        "ok": ok,
+                        "rate_limited_override": rate_limited,
+                        "detail": (detail or "")[:220],
+                        "completed": list(completed),
+                    },
+                )
+                # #endregion
+                if not ok and not rate_limited:
                     return CheckoutOutcome(
                         False,
                         message=(
@@ -1215,6 +2019,12 @@ class TargetHttpCheckout(CheckoutClient):
                         ),
                         retryable=False,
                     )
+                if rate_limited:
+                    detail = (
+                        f"final cart GET rate-limited after successful chain "
+                        f"(tcin={tcin}); treating as OK — {detail}"
+                    )
+                    console.print(f"[yellow]Preflight note[/yellow] — {detail}")
                 return CheckoutOutcome(
                     success=True,
                     order_id=None,
@@ -1233,11 +2043,12 @@ class TargetHttpCheckout(CheckoutClient):
                 if cvv_fail is not None:
                     return cvv_fail
                 fail = await asyncio.to_thread(
-                    self._commit_order_once,
+                    self._spam_place_order,
                     session,
                     req,
                     variables,
                     cookies,
+                    timeout_s=self.checkout_spam_timeout_seconds,
                 )
                 if fail is not None:
                     return fail
@@ -1251,6 +2062,30 @@ class TargetHttpCheckout(CheckoutClient):
                 continue
 
             if req.name == "add_to_cart":
+                # Browser-first when enabled: hot SKUs always AUTH_DENIED on HTTP ATC,
+                # so skip the useless 401 spam and open everyday Chrome immediately.
+                if self.browser_assist_atc and tcin:
+                    # #region agent log
+                    _agent_dbg(
+                        "H10",
+                        "target_http.py:_run_chain",
+                        "browser_atc_primary",
+                        {"tcin": tcin, "skip_http_atc": True},
+                    )
+                    # #endregion
+                    assisted = await self._assist_atc_via_system_chrome(
+                        session,
+                        tcin=tcin,
+                        cookies=cookies,
+                        variables=variables,
+                        reason="primary",
+                    )
+                    if assisted is None:
+                        completed.append("add_to_cart(browser_assist)")
+                        continue
+                    # Browser failed (OOS / timeout) — do not hammer HTTP ATC.
+                    return assisted
+
                 fail = await asyncio.to_thread(
                     self._spam_until_ok,
                     session,
@@ -1267,7 +2102,7 @@ class TargetHttpCheckout(CheckoutClient):
                 completed.append(f"{req.name}:ok")
                 continue
 
-            # Checkout / pre_checkout — paced retries (not money commit).
+            # update_cart / pre_checkout — paced retries until OK or cart loses TCIN.
             fail = await asyncio.to_thread(
                 self._spam_until_ok,
                 session,
@@ -1275,6 +2110,7 @@ class TargetHttpCheckout(CheckoutClient):
                 variables,
                 cookies,
                 timeout_s=self.checkout_spam_timeout_seconds,
+                stop_if_cart_missing_tcin=tcin or None,
                 delay_ms_min=self.spam_delay_ms_min,
                 delay_ms_max=self.spam_delay_ms_max,
             )
@@ -1350,13 +2186,52 @@ class TargetHttpCheckout(CheckoutClient):
         # browser session (sut→G / REMEMBERED) and forced a second login, defeating
         # `pokebot login target`. Order: login/warm once → export jar → HTTP only.
         if self.warm_cart_checkout:
+            # #region agent log
+            _agent_dbg(
+                "K",
+                "target_http.py:_place_order_live",
+                "warm_start",
+                {"dwell": self.warm_dwell_seconds, "tcin": variables.get("tcin")},
+            )
+            # #endregion
             try:
                 from pokebot.chrome_login import warm_target_cart_checkout
 
                 await warm_target_cart_checkout(dwell_seconds=self.warm_dwell_seconds)
                 # Give GSP a moment after CDP Chrome closes before HTTP reuse.
                 await asyncio.sleep(3.0)
+                # Re-load cookies after warm re-export.
+                cookies = self._merged_cookies(ctx)
+                sent = self._cookies_for_request(cookies)
+                # #region agent log
+                sidecar_age = None
+                with contextlib.suppress(Exception):
+                    from pokebot.session_auth import session_auth_path
+
+                    sp = session_auth_path("target")
+                    if sp.exists():
+                        sidecar_age = round(time.time() - sp.stat().st_mtime, 1)
+                _agent_dbg(
+                    "K",
+                    "target_http.py:_place_order_live",
+                    "warm_done",
+                    {
+                        "sidecar_age_s": sidecar_age,
+                        "cookie_lens": _cookie_lens(sent),
+                        "jwt": _jwt_safe_claims(sent.get("accessToken")),
+                        "has_px3": "_px3" in sent,
+                    },
+                )
+                # #endregion
             except Exception as exc:
+                # #region agent log
+                _agent_dbg(
+                    "K",
+                    "target_http.py:_place_order_live",
+                    "warm_failed",
+                    {"error": type(exc).__name__, "detail": str(exc)[:200]},
+                )
+                # #endregion
                 return CheckoutOutcome(
                     False,
                     message=(
@@ -1397,5 +2272,89 @@ class TargetHttpCheckout(CheckoutClient):
             + (f"; MISSING {missing}" if missing else "")
             + f"; telemetry → {self._telemetry.path})[/dim]"
         )
+        # #region agent log
+        sidecar_age = None
+        with contextlib.suppress(Exception):
+            from pokebot.session_auth import session_auth_path
+
+            sp = session_auth_path("target")
+            if sp.exists():
+                sidecar_age = round(time.time() - sp.stat().st_mtime, 1)
+        _agent_dbg(
+            "A-B-C",
+            "target_http.py:_place_order_live",
+            "pre_atc_session",
+            {
+                "tcin": variables.get("tcin"),
+                "qty": variables.get("quantity"),
+                "product_url_snip": str(variables.get("product_url") or "")[:120],
+                "impersonate": self.impersonate,
+                "identity_ua_snip": (self._identity.user_agent or "")[:80],
+                "identity_sec_ch_ua": self._identity.sec_ch_ua,
+                "warm_cart_checkout": self.warm_cart_checkout,
+                "preflight": self.preflight,
+                "sidecar_age_s": sidecar_age,
+                "merged_cookie_names": sorted(cookies.keys()),
+                "essential_cookie_names": sorted(sent.keys()),
+                "cookie_lens": _cookie_lens(sent),
+                "missing_required": missing,
+                "jwt": _jwt_safe_claims(sent.get("accessToken")),
+                "has_px3": "_px3" in sent,
+                "has_px2": "_px2" in sent,
+                "has_pxvid": "_pxvid" in sent,
+                "has_login_session": "login-session" in sent,
+                "telemetry_path": str(self._telemetry.path),
+            },
+        )
+        # #endregion
         session = await asyncio.to_thread(self._build_session, ctx)
+        if self.skip_atc:
+            console.print(
+                f"[cyan]FROM CART[/cyan] — listing cart "
+                f"(retry on 429; timeout {self.checkout_spam_timeout_seconds:.0f}s)…"
+            )
+            tcins, cart_detail = await asyncio.to_thread(
+                self._discover_cart_for_checkout,
+                session,
+                cookies=cookies,
+                variables=variables,
+            )
+            if tcins is None:
+                return CheckoutOutcome(
+                    False,
+                    message=(
+                        f"FROM CART failed — could not read cart ({cart_detail})"
+                    ),
+                    retryable=True,
+                )
+            if not tcins:
+                return CheckoutOutcome(
+                    False,
+                    message=f"FROM CART failed — cart is empty ({cart_detail})",
+                    retryable=False,
+                )
+            wanted = str(variables.get("tcin") or "").strip()
+            if wanted in ("", "00000000"):
+                wanted = ""
+            if wanted and wanted in tcins:
+                chosen = wanted
+            else:
+                chosen = tcins[0]
+                if wanted and wanted not in tcins:
+                    console.print(
+                        f"[yellow]Requested tcin={wanted} not in cart — "
+                        f"using {chosen}[/yellow]"
+                    )
+            variables["tcin"] = chosen
+            variables["sku"] = chosen
+            if not variables.get("product_url") or "/cart" in str(
+                variables.get("product_url") or ""
+            ):
+                variables["product_url"] = (
+                    f"https://www.target.com/p/-/A-{chosen}"
+                )
+            ctx.task.sku = chosen
+            console.print(
+                f"[cyan]FROM CART[/cyan] — {cart_detail}; checking out tcin={chosen}"
+            )
         return await self._run_chain(session, capture, variables, cookies)

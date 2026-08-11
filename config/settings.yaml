@@ -14,3 +14,12 @@ autobuy:
   dedup_window_seconds: 60
   retailers:
     - target
+
+# Discord → HTTP checkout (reseller run --source discord|both).
+# Requires DISCORD_BOT_TOKEN + bot invited to the server with Message Content Intent.
+discord:
+  guild_id: "1457553935848964251"
+  channel_id: "1457563918720569394"
+  token_env: DISCORD_BOT_TOKEN
+  watchlist_only: false
+  open_in_chrome: true

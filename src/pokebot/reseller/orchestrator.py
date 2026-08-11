@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+from typing import Literal
+
 from rich.console import Console
 
 from pokebot.alert_tracker import ActedAlertTracker, AlertKey
 from pokebot.config import Settings
-from pokebot.doctor import check_target_auth_sidecar
+from pokebot.doctor import check_target_auth_sidecar, check_target_mobile_auth_sidecar
+from pokebot.platform_util import open_url_in_system_chrome
 from pokebot.reseller.pipeline import TargetPipeline
 from pokebot.reseller.settings import ResellerSettings, load_reseller_settings
 from pokebot.restockr.client import RestockRClient
@@ -14,9 +18,22 @@ from pokebot.stores import normalize_store
 
 console = Console()
 
+AlertSource = Literal["restockr", "discord"]
+
+
+def _sidecar_age_seconds(*, mobile: bool = False) -> float | None:
+    from pokebot.session_auth import MOBILE_RETAILER, session_auth_path
+
+    path = session_auth_path(MOBILE_RETAILER if mobile else "target")
+    if not path.exists():
+        return None
+    import time
+
+    return max(0.0, time.time() - path.stat().st_mtime)
+
 
 class ResellerOrchestrator:
-    """RestockR-driven Target HTTP checkout using Chrome-exported sidecar cookies."""
+    """Alert-driven Target HTTP checkout using Chrome-exported sidecar cookies."""
 
     def __init__(
         self,
@@ -36,63 +53,173 @@ class ResellerOrchestrator:
         )
         self._purchased_skus: set[str] = set()
 
-    async def start(self) -> None:
-        self.profile = await self.client.ensure_authenticated()
-        console.print(
-            f"[green]Logged in as[/green] {self.profile.username} "
-            f"— watchlist: {len(self.profile.product_skus)} SKU(s)"
-        )
+    async def start(self, *, sources: set[AlertSource] | None = None) -> None:
+        active: set[AlertSource] = sources or {"restockr"}
+        if not active:
+            raise ValueError("At least one alert source is required")
 
-        if self.pipeline.ensure_default_account():
+        if "restockr" in active:
+            self.profile = await self.client.ensure_authenticated()
             console.print(
-                "[dim]No reseller accounts YAML — using session-target default account "
-                "+ data/sessions/target-auth.json sidecar.[/dim]"
+                f"[green]Logged in as[/green] {self.profile.username} "
+                f"— watchlist: {len(self.profile.product_skus)} SKU(s)"
+            )
+        else:
+            console.print(
+                "[dim]RestockR skipped — Discord-only mode "
+                "(no watchlist login).[/dim]"
             )
 
-        ok, detail = check_target_auth_sidecar()
+        mobile = self.reseller_settings.is_mobile_channel
+        if self.pipeline.ensure_default_account():
+            sidecar = (
+                "data/sessions/target-auth-mobile.json"
+                if mobile
+                else "data/sessions/target-auth.json"
+            )
+            console.print(
+                "[dim]No reseller accounts YAML — using session-target default account "
+                f"+ {sidecar} sidecar.[/dim]"
+            )
+
+        if mobile:
+            ok, detail = check_target_mobile_auth_sidecar()
+            login_hint = (
+                "python -m pokebot login target-mobile "
+                "--from-har data/captures/target-mobile/full.har"
+            )
+            stale_hint = (
+                "iOS access tokens expire ~8h. If ATC returns AUTH_DENIED, re-import: "
+                f"[bold]{login_hint}[/bold]"
+            )
+        else:
+            ok, detail = check_target_auth_sidecar()
+            login_hint = "python -m pokebot login target"
+            stale_hint = (
+                "_px3 often dies before JWT. If ATC returns AUTH_DENIED, re-run: "
+                f"[bold]{login_hint}[/bold]"
+            )
+
         if ok:
             console.print(f"[green]{detail}[/green]")
+            age_s = _sidecar_age_seconds(mobile=mobile)
+            if age_s is not None and age_s > 20 * 60:
+                mins = int(age_s // 60)
+                console.print(
+                    f"[yellow]Sidecar is {mins}m old[/yellow] — {stale_hint}"
+                )
         else:
             console.print(
                 f"[red]Sidecar not ready:[/red] {detail}\n"
-                "  Run: [bold]python -m pokebot login target[/bold]"
+                f"  Run: [bold]{login_hint}[/bold]"
             )
 
-        from pokebot.reseller.target_credentials import load_target_credentials
-        from pokebot.reseller.target_login import ensure_target_login
-
-        if load_target_credentials() is not None:
-            console.print("[cyan]Ensuring Target commerce login…[/cyan]")
-            result = await ensure_target_login(
-                browser_settings=self.settings.playwright,
-                headless=False,
-            )
-            if not result.ok:
-                console.print(
-                    "[yellow]Warning:[/yellow] Target not commerce-signed-in. "
-                    "Checkouts may fail until: "
-                    "python -m pokebot login target --auto"
-                )
-
-        console.print("[bold]Reseller pipeline mode:[/bold] LIVE")
-
-        listener = RestockRListener(
-            self.settings.restockr.socket_url, self.client.token or ""
-        )
-        listener.set_parent_id(self.parent_id)
-        listener.on_restock(self._handle_restock)
-
-        await listener.connect()
+        channel_label = "mobile (iOS app)" if mobile else "web (Chrome)"
+        source_label = "+".join(sorted(active))
         console.print(
-            "[green]Connected to RestockR — waiting for Target signals "
-            "(HTTP checkout via curl_cffi + Chrome sidecar)…[/green]"
+            f"[bold]Reseller pipeline mode:[/bold] LIVE "
+            f"[dim]sources={source_label} "
+            f"checkout_channel={self.reseller_settings.checkout_channel} "
+            f"({channel_label})[/dim]"
         )
-        try:
-            await listener.wait_forever()
-        finally:
-            await listener.disconnect()
+        console.print(
+            "[dim]After checkout attempt, watchlist / Discord hits open in everyday "
+            "Chrome (default profile). Opens after ATC so browser + bot don't share a "
+            "rate-limit window.[/dim]"
+        )
 
-    async def _handle_restock(self, alert: RestockAlert) -> None:
+        tasks: list[asyncio.Task[None]] = []
+        restock_listener: RestockRListener | None = None
+        discord_listener = None
+
+        if "restockr" in active:
+            restock_listener = RestockRListener(
+                self.settings.restockr.socket_url, self.client.token or ""
+            )
+            restock_listener.set_parent_id(self.parent_id)
+            restock_listener.on_restock(
+                lambda alert: self._handle_restock(alert, source="restockr")
+            )
+            await restock_listener.connect()
+            console.print(
+                "[green]Connected to RestockR — waiting for Target signals…[/green]"
+            )
+            tasks.append(asyncio.create_task(restock_listener.wait_forever()))
+
+        if "discord" in active:
+            from pokebot.discord_alerts.listener import DiscordAlertListener
+
+            discord_cfg = self.settings.discord
+            if not discord_cfg.guild_id or not discord_cfg.channel_id:
+                raise RuntimeError(
+                    "config/settings.yaml discord.guild_id and discord.channel_id "
+                    "are required for --source discord"
+                )
+            discord_listener = DiscordAlertListener.from_env(
+                guild_id=discord_cfg.guild_id,
+                channel_id=discord_cfg.channel_id,
+                token_env=discord_cfg.token_env,
+            )
+            discord_listener.on_restock(
+                lambda alert: self._handle_restock(alert, source="discord")
+            )
+            console.print(
+                f"[green]Starting Discord listener[/green] "
+                f"guild={discord_cfg.guild_id} channel={discord_cfg.channel_id}"
+            )
+            tasks.append(asyncio.create_task(discord_listener.run()))
+
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            if restock_listener is not None:
+                await restock_listener.disconnect()
+            if discord_listener is not None:
+                await discord_listener.close()
+
+    def _on_watchlist(self, sku: str) -> bool:
+        if self.profile is None:
+            return False
+        if "TEST-SKU" in sku:
+            return True
+        return sku in set(self.profile.product_skus)
+
+    async def _open_in_chrome(self, url: str) -> None:
+        console.print(f"[bold green]Opening in Chrome[/bold green] → {url}")
+        # #region agent log
+        try:
+            import json
+            import time
+            from pathlib import Path
+
+            path = Path(
+                "/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log"
+            )
+            payload = {
+                "sessionId": "bf9575",
+                "hypothesisId": "E",
+                "location": "orchestrator.py:_open_in_chrome",
+                "message": "chrome_open",
+                "data": {"url_snip": (url or "")[:120], "when": "post_checkout"},
+                "timestamp": int(time.time() * 1000),
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        try:
+            await asyncio.to_thread(open_url_in_system_chrome, url)
+        except Exception as exc:
+            console.print(f"[red]Failed to open Chrome:[/red] {exc}")
+
+    async def _handle_restock(
+        self,
+        alert: RestockAlert,
+        *,
+        source: AlertSource = "restockr",
+    ) -> None:
         store = normalize_store(alert.store)
         sku = alert.sku or alert.id
         url = alert.resolve_url(self.parent_id)
@@ -100,8 +227,9 @@ class ResellerOrchestrator:
         if store != "target":
             return
 
+        label = "Discord" if source == "discord" else "Target restock"
         console.print(
-            f"[cyan]Target restock signal[/cyan] {alert.product or sku} "
+            f"[cyan]{label} signal[/cyan] {alert.product or sku} "
             f"(qty={alert.stock_quantity})"
         )
 
@@ -109,11 +237,15 @@ class ResellerOrchestrator:
             console.print("[dim]Skipped — no product URL in alert[/dim]")
             return
 
-        if self.settings.autobuy.watchlist_only and self.profile:
-            watchlist = set(self.profile.product_skus)
-            if sku not in watchlist and "TEST-SKU" not in sku:
-                console.print(f"[dim]Skipped — SKU {sku} not on watchlist[/dim]")
-                return
+        watchlist_only = (
+            self.settings.discord.watchlist_only
+            if source == "discord"
+            else self.settings.autobuy.watchlist_only
+        )
+        on_watchlist = self._on_watchlist(sku)
+        if watchlist_only and not on_watchlist:
+            console.print(f"[dim]Skipped — SKU {sku} not on watchlist[/dim]")
+            return
 
         if alert.stock_quantity is not None:
             min_qty = self.settings.autobuy.target_min_quantity
@@ -135,11 +267,47 @@ class ResellerOrchestrator:
 
             console.print(
                 f"[bold green]Reseller checkout triggered[/bold green] → {url} "
-                f"(qty={alert.stock_quantity})"
+                f"(qty={alert.stock_quantity} source={source})"
             )
+            # #region agent log
+            try:
+                import json
+                import time
+                from pathlib import Path
+
+                path = Path(
+                    "/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log"
+                )
+                payload = {
+                    "sessionId": "bf9575",
+                    "hypothesisId": "E",
+                    "location": "orchestrator.py:_handle_restock",
+                    "message": "checkout_start",
+                    "data": {
+                        "sku": sku,
+                        "source": source,
+                        "on_watchlist": on_watchlist,
+                        "qty": alert.stock_quantity,
+                        "url_snip": (url or "")[:120],
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload) + "\n")
+            except Exception:
+                pass
+            # #endregion
             result = await self.pipeline.handle_alert(alert, parent_id=self.parent_id)
+            open_chrome = (
+                self.settings.discord.open_in_chrome
+                if source == "discord"
+                else on_watchlist
+            )
             if result is None:
                 console.print("[red]No result — task could not be built[/red]")
+                if open_chrome:
+                    await self._open_in_chrome(url)
                 return
             if result.success:
                 self._purchased_skus.add(sku)
@@ -149,3 +317,7 @@ class ResellerOrchestrator:
                 f"sku={result.sku} order_id={result.order_id} "
                 f"attempts={result.attempts} msg={result.message}"
             )
+            # Open after ATC/checkout so the PDP load doesn't compete for the
+            # same Target account rate limit during the bot's cart POST.
+            if open_chrome:
+                await self._open_in_chrome(url)

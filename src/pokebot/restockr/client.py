@@ -10,7 +10,12 @@ from pokebot.restockr.models import UserProfile
 
 # RestockR rejects stock Python TLS clients (httpx/requests) with
 # 403 "Automated clients are not permitted." Browser JA3 via curl_cffi works.
-_IMPERSONATE = "chrome146"
+
+
+def _restockr_impersonate() -> str:
+    from pokebot.reseller.impersonation import curl_impersonate_for_channel
+
+    return curl_impersonate_for_channel("chrome")
 
 
 def browser_headers(*, authorization: str | None = None) -> dict[str, str]:
@@ -81,7 +86,7 @@ async def _restockr_request(
             'Install with: pip install -e ".[reseller]"'
         ) from exc
 
-    async with AsyncSession(impersonate=_IMPERSONATE) as session:
+    async with AsyncSession(impersonate=_restockr_impersonate()) as session:
         response = await session.request(
             method,
             url,

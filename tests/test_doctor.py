@@ -29,10 +29,26 @@ def test_check_architecture_runs() -> None:
 
 
 def test_http_fingerprint_ready() -> None:
+    from pokebot.reseller.impersonation import curl_impersonate_for_channel
+
+    resolved = curl_impersonate_for_channel("chrome")
+    ok, detail = check_http_fingerprint_ready()
+    assert ok is True
+    assert resolved in detail
+    assert "impersonate=" in detail
+
+
+def test_http_fingerprint_falls_back_when_pin_missing(monkeypatch) -> None:
+    from pokebot.reseller import impersonation
+
+    monkeypatch.setattr(
+        impersonation,
+        "_available_targets",
+        lambda: {"chrome136", "chrome131", "chrome120"},
+    )
     ok, detail = check_http_fingerprint_ready(curl_impersonate="chrome146")
     assert ok is True
-    assert "chrome146" in detail
-    assert "impersonate=" in detail
+    assert "chrome136" in detail
 
 
 def _make_jwt(**claims) -> str:

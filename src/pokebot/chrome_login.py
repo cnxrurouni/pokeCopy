@@ -603,7 +603,7 @@ async def warm_target_cart_checkout(
     Call this *before* HTTP ATC. Opening Chrome after curl_cffi ATC often demotes
     the profile to guest (sut=G) / REMEMBERED and forces a second login.
     """
-    from pokebot.session_auth import save_session_auth
+    from pokebot.session_auth import save_session_auth_warm
 
     profile = target_session_profile()
     print(
@@ -639,7 +639,8 @@ async def warm_target_cart_checkout(
             # Registered cookies on www.target.com/checkout are enough. Header
             # "Sign in" / footer text must not block warm-up (false positive loop).
             if ok and not hard_wall:
-                path = save_session_auth("target", cookies)
+                # PX-only-safe merge: never overwrite a good accessToken with MI6.
+                path = save_session_auth_warm("target", cookies)
                 where = final_url or page.get("href") or "?"
                 print(f"PX warm OK — url={where} {detail} → {path}")
                 return cookies

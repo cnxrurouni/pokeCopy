@@ -45,12 +45,15 @@ def _first_available(candidates: tuple[str, ...], available: set[str]) -> str | 
 def curl_impersonate_for_channel(channel: str | None, *, override: str | None = None) -> str:
     """Resolve the curl_cffi impersonation target.
 
-    Prefer ``reseller.curl_impersonate`` (``override``). ``channel`` is legacy and
-    ignored except as a last-resort family hint when override is unset.
+    Prefer ``reseller.curl_impersonate`` (``override``) when that target is
+    installed. If the override is missing from this curl_cffi build, fall back
+    to the newest available Chrome (or engine-family) target.
     """
     available = _available_targets()
     if override:
-        return override
+        if not available or override in available:
+            return override
+        # Pinned target not in this curl_cffi — keep going with preferred list.
 
     ch = (channel or "").lower()
     if ch in ("firefox",):
@@ -60,7 +63,7 @@ def curl_impersonate_for_channel(channel: str | None, *, override: str | None = 
     else:
         target = _first_available(_PREFERRED_CHROMIUM, available)
 
-    return target or "chrome"
+    return target or override or "chrome"
 
 
 def available_curl_impersonate_targets() -> set[str]:
@@ -68,19 +71,20 @@ def available_curl_impersonate_targets() -> set[str]:
     return _available_targets()
 
 
-def check_curl_impersonate_ready(target: str = "chrome146") -> tuple[bool, str]:
-    """Verify curl_cffi can impersonate ``target`` (or report empty catalog)."""
+def check_curl_impersonate_ready(target: str | None = None) -> tuple[bool, str]:
+    """Verify curl_cffi can impersonate ``target`` (or the auto-resolved Chrome)."""
+    resolved = target or curl_impersonate_for_channel("chrome")
     available = _available_targets()
     if not available:
         return (
             True,
-            f"curl_cffi BrowserType catalog empty/unavailable — assuming {target} ok",
+            f"curl_cffi BrowserType catalog empty/unavailable — assuming {resolved} ok",
         )
-    if target in available:
-        return True, f"curl_cffi impersonate={target} available"
+    if resolved in available:
+        return True, f"curl_cffi impersonate={resolved} available"
     sample = ", ".join(sorted(available)[:8])
     return (
         False,
-        f"curl_cffi missing impersonate={target!r} (have: {sample}…); "
+        f"curl_cffi missing impersonate={resolved!r} (have: {sample}…); "
         "upgrade curl_cffi or set reseller.curl_impersonate to an available target",
     )

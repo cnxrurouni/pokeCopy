@@ -6,6 +6,7 @@ from pokebot.enums import Retailer
 from pokebot.quantity import resolve_quantity_cap
 from pokebot.reseller.checkout.base import CheckoutClient, CheckoutContext
 from pokebot.reseller.checkout.target_http import TargetHttpCheckout
+from pokebot.reseller.checkout.target_mobile import TargetMobileCheckout
 from pokebot.reseller.impersonation import curl_impersonate_for_channel
 from pokebot.reseller.fingerprint_contract import resolve_client_identity
 from pokebot.reseller.models import (
@@ -22,13 +23,36 @@ from pokebot.reseller.scheduler import TaskScheduler
 from pokebot.reseller.settings import ResellerSettings, load_reseller_settings
 from pokebot.reseller.token_bank import TokenBank
 from pokebot.restockr.models import RestockAlert
-from pokebot.session_auth import load_session_auth, missing_sidecar_cookies
+from pokebot.session_auth import (
+    load_mobile_session_auth,
+    load_session_auth,
+    missing_mobile_sidecar_cookies,
+    missing_sidecar_cookies,
+)
 
 console = Console()
 
 
-def token_from_sidecar(account_id: str, *, ttl_seconds: float) -> HarvestedToken | None:
-    """Build a checkout token jar from the Chrome-exported sidecar (no harvest)."""
+def token_from_sidecar(
+    account_id: str,
+    *,
+    ttl_seconds: float,
+    mobile: bool = False,
+) -> HarvestedToken | None:
+    """Build a checkout token jar from the Chrome or iOS app sidecar (no harvest)."""
+    if mobile:
+        cookies = load_mobile_session_auth()
+        if missing_mobile_sidecar_cookies(cookies):
+            return None
+        return HarvestedToken(
+            kind=TokenKind.PX3,
+            retailer=Retailer.TARGET,
+            value=cookies.get("_pxhd") or cookies.get("accessToken") or "",
+            cookies=dict(cookies),
+            ttl_seconds=ttl_seconds,
+            account_id=account_id,
+            created_at=_utcnow(),
+        )
     cookies = load_session_auth("target")
     missing = missing_sidecar_cookies(cookies)
     if missing:
@@ -74,28 +98,59 @@ class TargetPipeline:
         accounts = AccountStore.from_yaml(settings.resolved_accounts_path())
         proxies = ProxyManager.from_yaml(settings.resolved_accounts_path())
         token_bank = TokenBank()
-        impersonate = curl_impersonate_for_channel(
-            "chrome", override=settings.curl_impersonate or "chrome146"
-        )
-        identity = resolve_client_identity(
-            "chrome", curl_impersonate_override=impersonate
-        )
-        checkout = TargetHttpCheckout(
-            impersonate=identity.curl_impersonate,
-            identity=identity,
-            capture_path=settings.resolved_capture_path(),
-            atc_spam_timeout_seconds=settings.atc_spam_timeout_seconds,
-            checkout_spam_timeout_seconds=settings.checkout_spam_timeout_seconds,
-            atc_retry_delay_ms_min=settings.atc_retry_delay_ms_min,
-            atc_retry_delay_ms_max=settings.atc_retry_delay_ms_max,
-            spam_delay_ms_min=settings.spam_delay_ms_min,
-            spam_delay_ms_max=settings.spam_delay_ms_max,
-            auth_denied_abort_after=settings.auth_denied_abort_after,
-            rate_limit_abort_after=settings.rate_limit_abort_after,
-            rate_limit_cooldown_seconds=settings.rate_limit_cooldown_seconds,
-            warm_cart_checkout=settings.warm_cart_checkout,
-            warm_dwell_seconds=settings.warm_dwell_seconds,
-        )
+        capture_path = settings.resolved_capture_path()
+        if settings.is_mobile_channel:
+            # Separate infra: iOS app capture-replay (no browser-assist).
+            impersonate = curl_impersonate_for_channel(
+                "safari", override=settings.curl_impersonate
+            )
+            identity = resolve_client_identity(
+                "ios_app", curl_impersonate_override=impersonate
+            )
+            checkout: CheckoutClient = TargetMobileCheckout(
+                impersonate=identity.curl_impersonate,
+                identity=identity,
+                capture_path=capture_path,
+                atc_spam_timeout_seconds=settings.atc_spam_timeout_seconds,
+                checkout_spam_timeout_seconds=settings.checkout_spam_timeout_seconds,
+                atc_retry_delay_ms_min=settings.atc_retry_delay_ms_min,
+                atc_retry_delay_ms_max=settings.atc_retry_delay_ms_max,
+                spam_delay_ms_min=settings.spam_delay_ms_min,
+                spam_delay_ms_max=settings.spam_delay_ms_max,
+                auth_denied_abort_after=settings.auth_denied_abort_after,
+                rate_limit_abort_after=settings.rate_limit_abort_after,
+                rate_limit_cooldown_seconds=settings.rate_limit_cooldown_seconds,
+                default_quantity=2,
+            )
+            console.print(
+                f"[cyan]Checkout channel=mobile[/cyan] — "
+                f"capture={capture_path.name} identity={identity.summary()}"
+            )
+        else:
+            impersonate = curl_impersonate_for_channel(
+                "chrome", override=settings.curl_impersonate
+            )
+            identity = resolve_client_identity(
+                "chrome", curl_impersonate_override=impersonate
+            )
+            checkout = TargetHttpCheckout(
+                impersonate=identity.curl_impersonate,
+                identity=identity,
+                capture_path=capture_path,
+                atc_spam_timeout_seconds=settings.atc_spam_timeout_seconds,
+                checkout_spam_timeout_seconds=settings.checkout_spam_timeout_seconds,
+                atc_retry_delay_ms_min=settings.atc_retry_delay_ms_min,
+                atc_retry_delay_ms_max=settings.atc_retry_delay_ms_max,
+                spam_delay_ms_min=settings.spam_delay_ms_min,
+                spam_delay_ms_max=settings.spam_delay_ms_max,
+                auth_denied_abort_after=settings.auth_denied_abort_after,
+                rate_limit_abort_after=settings.rate_limit_abort_after,
+                rate_limit_cooldown_seconds=settings.rate_limit_cooldown_seconds,
+                warm_cart_checkout=settings.warm_cart_checkout,
+                warm_dwell_seconds=settings.warm_dwell_seconds,
+                browser_assist_atc=settings.browser_assist_atc,
+                browser_assist_timeout_seconds=settings.browser_assist_timeout_seconds,
+            )
         scheduler = TaskScheduler(
             per_account_concurrency=settings.per_account_concurrency,
             global_concurrency=settings.global_concurrency,
@@ -201,7 +256,9 @@ class TargetPipeline:
             )
             if token is None:
                 token = token_from_sidecar(
-                    account.id, ttl_seconds=self.settings.px_token_ttl_seconds
+                    account.id,
+                    ttl_seconds=self.settings.px_token_ttl_seconds,
+                    mobile=self.settings.is_mobile_channel,
                 )
                 if token is not None:
                     await self.token_bank.deposit(token)
@@ -210,11 +267,20 @@ class TargetPipeline:
                     )
 
             if token is None:
-                missing = missing_sidecar_cookies(load_session_auth("target"))
-                last_error = (
-                    "no usable auth/_px3 sidecar "
-                    f"(missing {missing or 'jar'}). Run: python -m pokebot login target"
-                )
+                if self.settings.is_mobile_channel:
+                    missing = missing_mobile_sidecar_cookies(load_mobile_session_auth())
+                    last_error = (
+                        "no usable mobile iOS auth sidecar "
+                        f"(missing {missing or 'jar'}). Run: "
+                        "python -m pokebot login target-mobile "
+                        "--from-har data/captures/target-mobile/full.har"
+                    )
+                else:
+                    missing = missing_sidecar_cookies(load_session_auth("target"))
+                    last_error = (
+                        "no usable auth/_px3 sidecar "
+                        f"(missing {missing or 'jar'}). Run: python -m pokebot login target"
+                    )
                 console.print(f"[yellow]{last_error}[/yellow]")
                 task.status = TaskStatus.FAILED
                 return TaskResult(
@@ -231,9 +297,14 @@ class TargetPipeline:
             task.status = TaskStatus.CHECKING_OUT
             if account.fingerprint is None:
                 account.fingerprint = self.fingerprints.build(account)
+            jar_label = (
+                "iOS app sidecar"
+                if self.settings.is_mobile_channel
+                else "Chrome sidecar"
+            )
             console.print(
                 f"[cyan]HTTP checkout[/cyan] — add_to_cart for {task.sku} "
-                f"(curl_cffi; cookies from Chrome sidecar)"
+                f"(curl_cffi; cookies from {jar_label})"
             )
             outcome = await self.checkout.place_order(
                 CheckoutContext(

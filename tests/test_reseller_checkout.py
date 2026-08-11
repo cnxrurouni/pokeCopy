@@ -9,6 +9,10 @@ from pokebot.reseller.checkout.target_http import TargetHttpCheckout
 from pokebot.reseller.models import Account, CheckoutTask, HarvestedToken, TokenKind
 
 
+_CART_OK = '{"cart_items":[{"tcin":"1001560450","quantity":1}]}'
+_CART_EMPTY = '{"cart_items":[]}'
+
+
 class _FakeResp:
     def __init__(self, status_code: int, text: str, headers: dict | None = None) -> None:
         self.status_code = status_code
@@ -22,22 +26,57 @@ class _FakeResp:
 
 
 class _FakeSession:
-    """Records requests and returns queued responses — no network."""
+    """Records requests and returns queued responses — no network.
 
-    def __init__(self, responses: list[tuple[int, str]]) -> None:
+    Cart GET probes are synthesized so checkout-spam polls do not steal the
+    scripted ATC/checkout queue. After a successful ATC POST, the TCIN from the
+    request body is treated as in-cart (unless ``cart_body`` is forced).
+    """
+
+    def __init__(
+        self,
+        responses: list[tuple[int, str]],
+        *,
+        cart_body: str | None = None,
+    ) -> None:
         self._responses = list(responses)
+        self._cart_body = cart_body
+        self._in_cart: set[str] = set()
         self.calls: list[tuple[str, str, dict | None]] = []
 
     def request(self, method: str, url: str, headers=None, data=None) -> _FakeResp:
         self.calls.append((method, url, headers))
+        # Cart-verify GETs only (not payment_instructions lookup on same host path).
+        if (
+            method.upper() == "GET"
+            and "web_checkouts/v1/cart" in url
+            and "PAYMENT_INSTRUCTIONS" not in url
+            and "cart_views" not in url
+        ):
+            if self._cart_body is not None:
+                return _FakeResp(200, self._cart_body)
+            items = [{"tcin": t, "quantity": 1} for t in sorted(self._in_cart)]
+            return _FakeResp(200, json.dumps({"cart_items": items}))
         if not self._responses:
             return _FakeResp(503, "empty queue")
         status, text = self._responses.pop(0)
+        if (
+            method.upper() == "POST"
+            and status in (200, 201)
+            and ("/atc" in url or "cart_items" in url)
+            and data
+        ):
+            try:
+                body = json.loads(data) if isinstance(data, (str, bytes, bytearray)) else {}
+            except Exception:
+                body = {}
+            if isinstance(body, dict):
+                tcin = body.get("tcin")
+                if tcin is None and isinstance(body.get("cart_item"), dict):
+                    tcin = body["cart_item"].get("tcin")
+                if tcin is not None:
+                    self._in_cart.add(str(tcin))
         return _FakeResp(status, text)
-
-
-_CART_OK = '{"cart_items":[{"tcin":"1001560450","quantity":1}]}'
-_CART_EMPTY = '{"cart_items":[]}'
 
 
 def _checkout(**kwargs) -> TargetHttpCheckout:
@@ -49,6 +88,10 @@ def _checkout(**kwargs) -> TargetHttpCheckout:
         spam_delay_ms_min=0,
         spam_delay_ms_max=0,
         warm_cart_checkout=False,
+        # Unit tests exercise HTTP ATC / place_order spam, not browser-assist.
+        browser_assist_atc=False,
+        auth_denied_abort_after=0,
+        rate_limit_abort_after=0,
     )
     defaults.update(kwargs)
     return TargetHttpCheckout(**defaults)
@@ -97,10 +140,8 @@ async def test_preflight_stops_before_commit_request():
     session = _FakeSession(
         [
             (201, '{"cart_id":"C1","cart_items":[{"tcin":"1001560450"}]}'),
-            (200, _CART_OK),
-            (200, "{}"),
-            (201, "{}"),
-            (200, _CART_OK),
+            (200, "{}"),  # checkout
+            (201, "{}"),  # pre_checkout
         ]
     )
     outcome = await checkout._run_chain(
@@ -127,11 +168,9 @@ async def test_atc_spam_retries_until_success():
             (403, "blocked"),
             (503, "busy"),
             (201, '{"cart_id":"C1"}'),
-            (200, _CART_OK),
-            (200, "{}"),
+            (200, "{}"),  # checkout
             (403, "guest"),
-            (201, "{}"),
-            (200, _CART_OK),
+            (201, "{}"),  # pre_checkout
         ]
     )
     outcome = await checkout._run_chain(
@@ -146,44 +185,79 @@ async def test_atc_spam_retries_until_success():
     assert len(atc_calls) == 3
 
 
-async def test_place_order_is_single_shot_not_spammed():
-    checkout = _checkout(preflight=False)
+async def test_place_order_spams_until_success(monkeypatch):
+    checkout = _checkout(
+        checkout_spam_timeout_seconds=30.0,
+        spam_delay_ms_min=0,
+        spam_delay_ms_max=0,
+    )
+    monkeypatch.setattr(checkout, "_spam_sleep", lambda **kwargs: None)
+    monkeypatch.setattr(
+        checkout,
+        "_verify_cart_has_tcin",
+        lambda *a, **k: (True, "cart contains tcin=123"),
+    )
     session = _FakeSession(
         [
-            (201, '{"cart_id":"C1","cart_items":[{"tcin":"123"}]}'),
-            (200, '{"cart_items":[{"tcin":"123"}]}'),
-            (200, "{}"),
-            (201, "{}"),
-            (200, '{"cart_id":"C1","payment_instructions":[]}'),
             (500, '{"error":"busy"}'),
+            (200, '{"order":{"order_id":"O1"}}'),
+        ]
+    )
+    req = CapturedRequest(
+        name="place_order",
+        method="POST",
+        url="https://x/po/",
+        expect_status=200,
+        success_contains="order",
+        commits_order=True,
+    )
+    outcome = checkout._spam_place_order(
+        session,
+        req,
+        {"tcin": "123", "quantity": 1},
+        {"accessToken": "a", "idToken": "i"},
+        timeout_s=30.0,
+    )
+    assert outcome is None
+    assert len(session.calls) == 2
+
+
+async def test_place_order_ambiguous_success_does_not_retry(monkeypatch):
+    checkout = _checkout(checkout_spam_timeout_seconds=30.0)
+    monkeypatch.setattr(checkout, "_spam_sleep", lambda **kwargs: None)
+    session = _FakeSession(
+        [
+            (200, '{"status":"ok"}'),  # missing success marker "order"
             (200, '{"order":{"order_id":"O1"}}'),  # must NOT be consumed
         ]
     )
-    outcome = await checkout._run_chain(
-        session, _capture(), {"tcin": "123", "quantity": 1, "cart_id": "C1"}
+    req = CapturedRequest(
+        name="place_order",
+        method="POST",
+        url="https://x/po/",
+        expect_status=200,
+        success_contains="order",
+        commits_order=True,
     )
+    outcome = checkout._spam_place_order(
+        session,
+        req,
+        {"tcin": "123"},
+        {"accessToken": "a"},
+        timeout_s=30.0,
+    )
+    assert outcome is not None
     assert outcome.success is False
-    assert outcome.retryable is False
-    assert "not re-POSTing" in (outcome.message or "") or "failed" in (
-        outcome.message or ""
-    ).lower()
-    po_calls = [c for c in session.calls if "/po/" in c[1]]
-    assert len(po_calls) == 1
+    assert "ambiguous" in (outcome.message or "")
+    assert len(session.calls) == 1
 
 
 async def test_preflight_fails_when_cart_never_gets_tcin():
     checkout = _checkout(preflight=True, atc_spam_timeout_seconds=0.15)
+    # Force empty cart reads even after ATC HTTP 201 (simulates ATC lie / lag).
     session = _FakeSession(
-        [
-            (201, '{"cart_id":"C1"}'),
-            (200, _CART_EMPTY),
-            (200, _CART_EMPTY),
-            (200, _CART_EMPTY),
-            (200, _CART_EMPTY),
-            (200, _CART_EMPTY),
-            (200, _CART_EMPTY),
-            (200, _CART_EMPTY),
-        ]
+        [(201, '{"cart_id":"C1"}')],
+        cart_body=_CART_EMPTY,
     )
     outcome = await checkout._run_chain(
         session,
@@ -205,9 +279,8 @@ async def test_full_chain_places_order_and_extracts_id():
     session = _FakeSession(
         [
             (201, '{"cart_id":"C1","cart_items":[{"tcin":"123"}]}'),
-            (200, '{"cart_items":[{"tcin":"123"}]}'),
-            (200, "{}"),
-            (201, "{}"),
+            (200, "{}"),  # checkout
+            (201, "{}"),  # pre_checkout
             (200, '{"cart_id":"C1","payment_instructions":[]}'),
             (
                 200,
@@ -231,9 +304,8 @@ async def test_live_requires_target_cvv_when_card_needs_it(monkeypatch):
     session = _FakeSession(
         [
             (201, '{"cart_id":"C1","cart_items":[{"tcin":"123"}]}'),
-            (200, '{"cart_items":[{"tcin":"123"}]}'),
-            (200, "{}"),
-            (201, "{}"),
+            (200, "{}"),  # checkout
+            (201, "{}"),  # pre_checkout
             (
                 200,
                 json.dumps(
@@ -266,9 +338,8 @@ async def test_live_attaches_cvv_before_place_order(monkeypatch):
     session = _FakeSession(
         [
             (201, '{"cart_id":"C1","cart_items":[{"tcin":"123"}]}'),
-            (200, '{"cart_items":[{"tcin":"123"}]}'),
-            (200, "{}"),
-            (201, "{}"),
+            (200, "{}"),  # checkout
+            (201, "{}"),  # pre_checkout
             (
                 200,
                 json.dumps(
@@ -315,7 +386,8 @@ async def test_fatal_400_does_not_spam_forever():
     )
     assert outcome.success is False
     assert outcome.retryable is False
-    assert len(session.calls) == 1
+    atc_calls = [c for c in session.calls if c[1] == "https://x/atc"]
+    assert len(atc_calls) == 1
 
 
 def test_validate_ready_rejects_non_numeric_tcin():
@@ -407,7 +479,9 @@ def test_request_headers_include_client_identity():
         {"tcin": "1001560450", "quantity": 1, "product_url": "https://www.target.com/p/-/A-1"},
         {"accessToken": "tok", "idToken": "id", "_px3": "px", "_px2": "px2"},
     )
-    assert "Chrome/146" in headers["user-agent"]
+    # UA major follows resolved curl_cffi target (may fall back from chrome146).
+    major = checkout.impersonate.replace("chrome", "").rstrip("a")
+    assert f"Chrome/{major}" in headers["user-agent"]
     assert headers["sec-ch-ua"]
     assert headers["sec-ch-ua-mobile"] == "?0"
     assert headers["sec-ch-ua-platform"]
@@ -500,6 +574,265 @@ async def test_atc_stops_on_max_purchase_limit():
     assert "MAX_PURCHASE_LIMIT_EXCEEDED" in (outcome.message or "")
     assert len(session.calls) == 1
 
+
+async def test_atc_continues_after_429(monkeypatch):
+    checkout = _checkout(
+        atc_spam_timeout_seconds=30.0,
+        rate_limit_abort_after=0,
+        atc_retry_delay_ms_min=0,
+        atc_retry_delay_ms_max=0,
+    )
+    monkeypatch.setattr(checkout, "_spam_sleep", lambda **kwargs: None)
+    monkeypatch.setattr(checkout, "_rate_limit_cooldown", lambda **kwargs: 0.0)
+    monkeypatch.setattr(
+        checkout,
+        "_verify_cart_has_tcin",
+        lambda *a, **k: (True, "cart has tcin"),
+    )
+    session = _FakeSession(
+        [(429, "too many"), (201, '{"cart_id":"c1","cart_items":[{"tcin":"1001560450"}]}')]
+    )
+    capture = _capture()
+    variables = {
+        "tcin": "1001560450",
+        "quantity": 1,
+        "product_url": "https://www.target.com/p/-/A-1001560450",
+    }
+    cookies = {"accessToken": "a", "idToken": "i", "_px3": "p" * 40}
+    outcome = checkout._spam_until_ok(
+        session,
+        capture.requests[0],
+        variables,
+        cookies,
+        timeout_s=30.0,
+        require_cart_tcin="1001560450",
+        label="add_to_cart",
+        delay_ms_min=0,
+        delay_ms_max=0,
+    )
+    assert outcome is None
+    assert len(session.calls) == 2
+
+
+async def test_atc_stops_on_first_auth_denied():
+    checkout = _checkout(atc_spam_timeout_seconds=30.0, auth_denied_abort_after=1)
+    body = (
+        '{"errorCode":"T83072242","errorKey":"_ERR_AUTH_DENIED",'
+        '"errorMessage":"Error Code T83072242"}'
+    )
+    session = _FakeSession([(401, body), (201, '{"cart_id":"c1"}')])
+    capture = _capture()
+    variables = {
+        "tcin": "1001560450",
+        "quantity": 1,
+        "product_url": "https://www.target.com/p/-/A-1001560450",
+    }
+    cookies = {"accessToken": "a", "idToken": "i", "_px3": "p" * 40}
+    outcome = checkout._spam_until_ok(
+        session,
+        capture.requests[0],
+        variables,
+        cookies,
+        timeout_s=30.0,
+        require_cart_tcin="1001560450",
+        label="add_to_cart",
+    )
+    assert outcome is not None
+    assert outcome.success is False
+    assert "AUTH_DENIED" in (outcome.message or "")
+    assert len(session.calls) == 1
+
+
+async def test_atc_retries_auth_denied_then_ok(monkeypatch):
+    checkout = _checkout(
+        atc_spam_timeout_seconds=30.0,
+        auth_denied_abort_after=3,
+        atc_retry_delay_ms_min=0,
+        atc_retry_delay_ms_max=0,
+    )
+    monkeypatch.setattr(checkout, "_spam_sleep", lambda **kwargs: None)
+    monkeypatch.setattr(
+        checkout,
+        "_verify_cart_has_tcin",
+        lambda *a, **k: (True, "cart has tcin"),
+    )
+    body401 = (
+        '{"errorCode":"T83072242","errorKey":"_ERR_AUTH_DENIED",'
+        '"errorMessage":"Error Code T83072242"}'
+    )
+    body201 = '{"cart_id":"c1","cart_items":[{"tcin":"1001560450","quantity":1}]}'
+    session = _FakeSession([(401, body401), (201, body201)])
+    capture = _capture()
+    variables = {
+        "tcin": "1001560450",
+        "quantity": 1,
+        "product_url": "https://www.target.com/p/-/A-1001560450",
+    }
+    cookies = {"accessToken": "a", "idToken": "i", "_px3": "p" * 40}
+    outcome = checkout._spam_until_ok(
+        session,
+        capture.requests[0],
+        variables,
+        cookies,
+        timeout_s=30.0,
+        require_cart_tcin="1001560450",
+        label="add_to_cart",
+        delay_ms_min=0,
+        delay_ms_max=0,
+    )
+    assert outcome is None  # success
+    assert len(session.calls) == 2
+
+
+
+def test_cart_tcin_confirmed_absent_only_on_successful_missing_read():
+    assert (
+        TargetHttpCheckout._cart_tcin_confirmed_absent(
+            False, "cart missing tcin=123 (items=[])"
+        )
+        is True
+    )
+    assert (
+        TargetHttpCheckout._cart_tcin_confirmed_absent(
+            False, "mobile cart missing tcin=123 (items=['999'])"
+        )
+        is True
+    )
+    assert (
+        TargetHttpCheckout._cart_tcin_confirmed_absent(
+            True, "cart contains tcin=123"
+        )
+        is False
+    )
+    assert (
+        TargetHttpCheckout._cart_tcin_confirmed_absent(
+            False, "cart GET HTTP 429: 'too many'"
+        )
+        is False
+    )
+    assert (
+        TargetHttpCheckout._cart_tcin_confirmed_absent(
+            False, "cart verify request failed: timeout"
+        )
+        is False
+    )
+
+
+async def test_checkout_spam_stops_when_cart_loses_tcin(monkeypatch):
+    checkout = _checkout(
+        checkout_spam_timeout_seconds=30.0,
+        spam_delay_ms_min=0,
+        spam_delay_ms_max=0,
+    )
+    monkeypatch.setattr(checkout, "_spam_sleep", lambda **kwargs: None)
+    monkeypatch.setattr(
+        checkout,
+        "_verify_cart_has_tcin",
+        lambda *a, **k: (False, "cart missing tcin=1001560450 (items=[])"),
+    )
+    session = _FakeSession([(500, "busy"), (500, "busy")])
+    req = CapturedRequest(
+        name="pre_checkout",
+        method="POST",
+        url="https://carts.target.com/pre_checkout",
+        expect_status=201,
+    )
+    variables = {
+        "tcin": "1001560450",
+        "quantity": 2,
+        "product_url": "https://www.target.com/p/-/A-1001560450",
+    }
+    cookies = {"accessToken": "a", "idToken": "i", "_px3": "p" * 40}
+    outcome = checkout._spam_until_ok(
+        session,
+        req,
+        variables,
+        cookies,
+        timeout_s=30.0,
+        stop_if_cart_missing_tcin="1001560450",
+        delay_ms_min=0,
+        delay_ms_max=0,
+    )
+    assert outcome is not None
+    assert outcome.success is False
+    assert "removed tcin=1001560450" in (outcome.message or "")
+
+
+async def test_checkout_spam_ignores_flaky_cart_get(monkeypatch):
+    checkout = _checkout(
+        checkout_spam_timeout_seconds=0.2,
+        spam_delay_ms_min=0,
+        spam_delay_ms_max=0,
+    )
+    monkeypatch.setattr(checkout, "_spam_sleep", lambda **kwargs: None)
+    monkeypatch.setattr(
+        checkout,
+        "_verify_cart_has_tcin",
+        lambda *a, **k: (False, "cart GET HTTP 429: 'too many'"),
+    )
+    session = _FakeSession([(500, "busy")] * 20)
+    req = CapturedRequest(
+        name="pre_checkout",
+        method="POST",
+        url="https://carts.target.com/pre_checkout",
+        expect_status=201,
+    )
+    variables = {
+        "tcin": "1001560450",
+        "quantity": 2,
+        "product_url": "https://www.target.com/p/-/A-1001560450",
+    }
+    cookies = {"accessToken": "a", "idToken": "i", "_px3": "p" * 40}
+    outcome = checkout._spam_until_ok(
+        session,
+        req,
+        variables,
+        cookies,
+        timeout_s=0.2,
+        stop_if_cart_missing_tcin="1001560450",
+        delay_ms_min=0,
+        delay_ms_max=0,
+    )
+    assert outcome is not None
+    assert "timed out" in (outcome.message or "")
+    assert "removed tcin" not in (outcome.message or "")
+
+
+def test_cart_list_429_is_inconclusive_not_empty():
+    checkout = _checkout()
+    session = _FakeSession([(429, '{"code":"DCO_RATE_LIMITED"}')])
+    # Force cart list through queued responses (disable synthetic cart GET).
+    session._cart_body = ""  # type: ignore[attr-defined]
+
+    def _request(method, url, headers=None, data=None):
+        session.calls.append((method, url, headers))
+        if not session._responses:
+            return _FakeResp(503, "empty queue")
+        status, text = session._responses.pop(0)
+        return _FakeResp(status, text)
+
+    session.request = _request  # type: ignore[method-assign]
+    tcins, detail = checkout._fetch_cart_tcins(
+        session, cookies={"accessToken": "a"}, variables={}
+    )
+    assert tcins is None
+    assert "429" in detail
+
+
+def test_cart_list_200_empty_is_definitive():
+    checkout = _checkout()
+
+    class _S:
+        calls = []
+
+        def request(self, method, url, headers=None, data=None):
+            return _FakeResp(200, _CART_EMPTY)
+
+    tcins, detail = checkout._fetch_cart_tcins(
+        _S(), cookies={"accessToken": "a"}, variables={}
+    )
+    assert tcins == []
+    assert "items=[]" in detail
 
 
 def test_resolve_placed_order_id_prefers_reference():

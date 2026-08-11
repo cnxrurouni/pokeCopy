@@ -130,16 +130,92 @@ def probe_target_cart_guest_type(cookies: dict[str, str]) -> str | None:
     try:
         from pokebot.reseller.fingerprint_contract import resolve_client_identity
 
-        headers.update(resolve_client_identity("chrome").browser_headers())
+        ident = resolve_client_identity("chrome")
+        headers.update(ident.browser_headers())
+        impersonate = ident.curl_impersonate
     except Exception:
         headers["accept-language"] = "en-US,en;q=0.9"
+        from pokebot.reseller.impersonation import curl_impersonate_for_channel
+
+        impersonate = curl_impersonate_for_channel("chrome")
     try:
         from curl_cffi import requests as curl_requests
 
         resp = curl_requests.get(
             cart_url,
             headers=headers,
-            impersonate="chrome146",
+            impersonate=impersonate,
+            timeout=20,
+        )
+        data = resp.json() if resp.text else {}
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    guest = data.get("guest_type")
+    return str(guest) if guest else None
+
+
+def probe_target_mobile_cart_guest_type(
+    cookies: dict[str, str],
+    *,
+    headers: dict[str, str] | None = None,
+) -> str | None:
+    """GET mobile cart_views; return guest_type or None on failure."""
+    access = (cookies.get("accessToken") or "").strip()
+    if not access:
+        return None
+    cart_url = (
+        "https://carts.target.com/web_checkouts/v1/cart_views"
+        "?cart_type=REGULAR&field_groups=CART%2CCART_ITEMS%2CSUMMARY"
+        "&iOSAppVersion=2026.30.0"
+        "&key=3d4d4435710335df6435c68e19a7cf67c635a01d"
+    )
+    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items() if v)
+    req_headers = {
+        "accept": "*/*",
+        "authorization": f"Bearer {access}",
+        "x-application-name": "Mobile App",
+        "x-channel-id": "APPS",
+        "cookie": cookie_header,
+    }
+    extra = headers or {}
+    for key in (
+        "x-visitor-id",
+        "x-scr",
+        "x-sapphire-context",
+        "x-client-access-token",
+    ):
+        if extra.get(key):
+            req_headers[key] = extra[key]
+    visitor = cookies.get("visitorId") or extra.get("x-visitor-id")
+    if visitor:
+        req_headers["x-visitor-id"] = visitor
+    try:
+        from pokebot.reseller.fingerprint_contract import resolve_client_identity
+        from pokebot.reseller.impersonation import curl_impersonate_for_channel
+
+        ident = resolve_client_identity("ios_app")
+        req_headers["user-agent"] = ident.user_agent
+        req_headers["accept-language"] = f"{ident.locale},en;q=0.9"
+        impersonate = curl_impersonate_for_channel(
+            "safari", override=ident.curl_impersonate
+        )
+    except Exception:
+        req_headers["user-agent"] = (
+            "Target/2026.30.0 iPhone17,3 iOS/26.5.2 "
+            "CFNetwork/3860.600.12 Darwin/25.5.0"
+        )
+        from pokebot.reseller.impersonation import curl_impersonate_for_channel
+
+        impersonate = curl_impersonate_for_channel("safari")
+    try:
+        from curl_cffi import requests as curl_requests
+
+        resp = curl_requests.get(
+            cart_url,
+            headers=req_headers,
+            impersonate=impersonate,
             timeout=20,
         )
         data = resp.json() if resp.text else {}
@@ -203,26 +279,90 @@ def check_target_auth_sidecar() -> tuple[bool, str]:
     )
 
 
+def check_target_mobile_auth_sidecar() -> tuple[bool, str]:
+    """Validate iOS app auth sidecar (no web _px3 requirement)."""
+    from pokebot.session_auth import (
+        MOBILE_RETAILER,
+        load_mobile_session_auth,
+        load_mobile_session_headers,
+        missing_mobile_sidecar_cookies,
+        session_auth_path,
+    )
+
+    path = session_auth_path(MOBILE_RETAILER)
+    cookies = load_mobile_session_auth()
+    headers = load_mobile_session_headers()
+    if not cookies:
+        return (
+            False,
+            (
+                f"no mobile auth sidecar at {path} — run: "
+                "python -m pokebot login target-mobile "
+                "--from-har data/captures/target-mobile/full.har"
+            ),
+        )
+    missing = missing_mobile_sidecar_cookies(cookies)
+    if missing:
+        return False, f"mobile sidecar missing {missing} ({path})"
+    if target_access_token_is_guest(cookies.get("accessToken")):
+        return False, f"mobile accessToken is GUEST (sut=G) at {path}"
+    if target_access_token_is_soft_remembered(cookies.get("accessToken")):
+        claims = decode_jwt_claims(cookies["accessToken"])
+        return (
+            False,
+            (
+                f"mobile sidecar is soft/REMEMBERED "
+                f"(asl={claims.get('asl')!r}, sco={claims.get('sco')!r}) at {path}"
+            ),
+        )
+    claims = decode_jwt_claims(cookies["accessToken"])
+    cli = str(claims.get("cli") or "")
+    if cli and "ios" not in cli.lower():
+        return False, f"mobile accessToken cli={cli!r} (expected ecom-ios-*) at {path}"
+    guest_type = probe_target_mobile_cart_guest_type(cookies, headers=headers)
+    if guest_type is not None and guest_type.upper() != "REGISTERED":
+        return (
+            False,
+            f"mobile cart guest_type={guest_type} (need REGISTERED) at {path}",
+        )
+    guest_note = f", guest_type={guest_type}" if guest_type else ""
+    return (
+        True,
+        (
+            f"mobile iOS auth sidecar OK "
+            f"(sut={claims.get('sut')}, cli={cli or '?'}{guest_note}, {path})"
+        ),
+    )
+
+
 def check_http_fingerprint_ready(
-    *, curl_impersonate: str = "chrome146"
+    *, curl_impersonate: str | None = None
 ) -> tuple[bool, str]:
     """Validate curl_cffi impersonate target + ClientIdentity header alignment."""
-    from pokebot.reseller.fingerprint_contract import resolve_client_identity
-    from pokebot.reseller.impersonation import check_curl_impersonate_ready
+    from pokebot.reseller.fingerprint_contract import (
+        chromium_major_from_impersonate,
+        resolve_client_identity,
+    )
+    from pokebot.reseller.impersonation import (
+        check_curl_impersonate_ready,
+        curl_impersonate_for_channel,
+    )
 
-    ok, detail = check_curl_impersonate_ready(curl_impersonate)
+    resolved = curl_impersonate_for_channel("chrome", override=curl_impersonate)
+    ok, detail = check_curl_impersonate_ready(resolved)
     if not ok:
         return False, detail
     ident = resolve_client_identity(
-        "chrome", curl_impersonate_override=curl_impersonate
+        "chrome", curl_impersonate_override=resolved
     )
     headers = ident.browser_headers()
     missing = [k for k in ("user-agent", "sec-ch-ua", "sec-ch-ua-platform") if not headers.get(k)]
     if missing:
         return False, f"ClientIdentity missing headers {missing}"
-    if "Chrome/146" not in headers["user-agent"] and curl_impersonate.startswith("chrome146"):
+    major = chromium_major_from_impersonate(ident.curl_impersonate)
+    if f"Chrome/{major}" not in headers["user-agent"]:
         return (
             False,
-            f"UA {headers['user-agent']!r} does not look like chrome146",
+            f"UA {headers['user-agent']!r} does not look like chrome{major}",
         )
     return True, f"{detail}; {ident.summary()}"

@@ -15,29 +15,33 @@ class ResellerSettings(BaseModel):
     # Outer retries when the sidecar/session is dead (not in-step ATC spam).
     max_attempts: int = 3
     max_quantity: int | None = None
-    atc_spam_timeout_seconds: float = 90.0
-    checkout_spam_timeout_seconds: float = 120.0
-    # Delay between ATC retries (often needs a few tries). Random ~1–2s avoids 429.
-    atc_retry_delay_ms_min: int = 1000
-    atc_retry_delay_ms_max: int = 2000
-    # Delay between checkout / pre_checkout / place_order retries (same pace).
-    spam_delay_ms_min: int = 1000
-    spam_delay_ms_max: int = 2000
+    atc_spam_timeout_seconds: float = 300.0
+    checkout_spam_timeout_seconds: float = 1200.0
+    # Delay between ATC retries (incl. after 429 — no long Retry-After sleep).
+    atc_retry_delay_ms_min: int = 500
+    atc_retry_delay_ms_max: int = 1000
+    # Delay between checkout / pre_checkout / place_order retries.
+    spam_delay_ms_min: int = 1500
+    spam_delay_ms_max: int = 3000
     # After ATC: open real Chrome on /cart → /checkout so PX can mint before APIs.
     warm_cart_checkout: bool = False
     warm_dwell_seconds: float = 3.0
-    # Abort after a few consecutive AUTH_DENIED responses (was 15 — too botty).
-    auth_denied_abort_after: int = 3
-    # After this many consecutive 429s (each with a cooldown), stop.
-    rate_limit_abort_after: int = 3
+    # Prefer everyday-Chrome ATC (AppleScript click); skip HTTP ATC when true.
+    # Ignored when checkout_channel=mobile (mobile never browser-assists).
+    browser_assist_atc: bool = True
+    browser_assist_timeout_seconds: float = 120.0
+    # HTTP ATC: 0 = never abort on AUTH_DENIED (keep until timeout / stock-limit).
+    auth_denied_abort_after: int = 0
+    # 0 = never hard-stop the step on 429 streak (cooldown + continue until timeout).
+    rate_limit_abort_after: int = 0
     # Sleep this long on 429 when Response has no Retry-After header.
-    rate_limit_cooldown_seconds: float = 30.0
+    rate_limit_cooldown_seconds: float = 60.0
     accounts_path: str | None = None
     capture_path: str | None = None
-    # Required fingerprint knob for curl_cffi (e.g. chrome146).
-    curl_impersonate: str | None = "chrome146"
-    # Browser click-ATC is disabled — money path is curl_cffi HTTP only.
-    browser_atc_enabled: bool = False
+    # Preferred curl_cffi target; falls back to newest available if missing.
+    curl_impersonate: str | None = None
+    # Separate infra: "web" (desktop Chrome capture) vs "mobile" (iOS app capture).
+    checkout_channel: str = "web"
 
     def resolved_accounts_path(self) -> Path:
         if self.accounts_path:
@@ -47,7 +51,18 @@ class ResellerSettings(BaseModel):
     def resolved_capture_path(self) -> Path:
         if self.capture_path:
             return Path(self.capture_path)
+        if (self.checkout_channel or "web").lower() in ("mobile", "ios", "ios_app", "app"):
+            return config_dir() / "reseller.capture.target.mobile.json"
         return config_dir() / "reseller.capture.target.json"
+
+    @property
+    def is_mobile_channel(self) -> bool:
+        return (self.checkout_channel or "web").lower() in (
+            "mobile",
+            "ios",
+            "ios_app",
+            "app",
+        )
 
 
 def load_reseller_settings() -> ResellerSettings:

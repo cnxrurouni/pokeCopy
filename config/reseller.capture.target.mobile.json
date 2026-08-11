@@ -1,0 +1,96 @@
+{
+  "retailer": "target",
+  "cookies": {},
+  "variables": {
+    "ios_app_version": "2026.30.0",
+    "shopping_location_id": "2329",
+    "guest_state": "CA",
+    "guest_zip": "91344"
+  },
+  "sequence": [
+    "add_to_cart",
+    "update_cart",
+    "pre_checkout",
+    "place_order"
+  ],
+  "requests": [
+    {
+      "name": "add_to_cart",
+      "method": "POST",
+      "url": "https://carts.target.com/web_checkouts/v1/cart_items?iOSAppVersion={{ios_app_version}}&key=3d4d4435710335df6435c68e19a7cf67c635a01d",
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "accept-language": "en-US,en;q=0.9",
+        "x-application-name": "Mobile App",
+        "x-channel-id": "APPS"
+      },
+      "body": "{\"cart_type\":\"REGULAR\",\"channel_id\":\"91\",\"cart_item\":{\"tcin\":\"{{tcin}}\",\"quantity\":{{quantity}}}}",
+      "extract": {
+        "cart_item_id": "cart_item_id",
+        "cart_id": "cart_id"
+      },
+      "success_contains": null,
+      "expect_status": 201,
+      "commits_order": false
+    },
+    {
+      "name": "update_cart",
+      "method": "PUT",
+      "url": "https://carts.target.com/web_checkouts/v1/cart?field_groups=ADDRESSES%2CCART%2CCART_ITEMS%2CFINANCE_PROVIDERS%2CPROMOTION_CODES%2CSUMMARY&iOSAppVersion={{ios_app_version}}&key=3d4d4435710335df6435c68e19a7cf67c635a01d",
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "accept-language": "en-US,en;q=0.9",
+        "x-application-name": "Mobile App",
+        "x-channel-id": "APPS"
+      },
+      "body": "{\"cart_type\":\"REGULAR\",\"shopping_context\":\"DIGITAL\",\"guest_location\":{\"state\":\"{{guest_state}}\",\"zip_code\":\"{{guest_zip}}\"},\"shopping_location_id\":\"{{shopping_location_id}}\",\"guest_profile\":{\"preferred_store_id\":\"{{shopping_location_id}}\"}}",
+      "extract": {},
+      "success_contains": null,
+      "expect_status": 200,
+      "commits_order": false
+    },
+    {
+      "name": "pre_checkout",
+      "method": "POST",
+      "url": "https://carts.target.com/web_checkouts/v1/pre_checkout?field_groups=ADDRESSES%2CCART%2CCART_ITEMS%2CFINANCE_PROVIDERS%2CPAYMENT_INSTRUCTIONS%2CPICKUP_INSTRUCTIONS%2CPROMOTION_CODES%2CSUMMARY&iOSAppVersion={{ios_app_version}}&key=3d4d4435710335df6435c68e19a7cf67c635a01d",
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "accept-language": "en-US,en;q=0.9",
+        "x-application-name": "Mobile App",
+        "x-channel-id": "APPS"
+      },
+      "body": "{\"cart_type\":\"REGULAR\"}",
+      "extract": {
+        "cart_id": "cart_id",
+        "reference_id": "reference_id"
+      },
+      "success_contains": null,
+      "expect_status": 201,
+      "commits_order": false
+    },
+    {
+      "name": "place_order",
+      "method": "POST",
+      "url": "https://carts.target.com/web_checkouts/v1/checkout?field_groups=ADDRESSES%2CCART%2CCART_ITEMS%2CPAYMENT_INSTRUCTIONS%2CPROMOTION_CODES%2CSUMMARY&iOSAppVersion={{ios_app_version}}&key=3d4d4435710335df6435c68e19a7cf67c635a01d",
+      "headers": {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "accept-language": "en-US,en;q=0.9",
+        "x-application-name": "Mobile App",
+        "x-channel-id": "APPS"
+      },
+      "body": "{\"channel_id\":\"91\",\"cart_type\":\"REGULAR\"}",
+      "extract": {
+        "reference_id": "orders.0.reference_id",
+        "order_number": "orders.0.order_number",
+        "order_id": "orders.0.order_id"
+      },
+      "success_contains": "order",
+      "expect_status": 200,
+      "commits_order": true
+    }
+  ]
+}

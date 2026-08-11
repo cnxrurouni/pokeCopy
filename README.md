@@ -44,8 +44,9 @@ Live place_order may need `export TARGET_CVV=…` when Target requires CVV.
 | [`config/reseller.yaml`](config/reseller.yaml) | `curl_impersonate`, retry/abort thresholds |
 | [`config/reseller.capture.target.json`](config/reseller.capture.target.json) | Captured Target API chain |
 
-HTTP fingerprint: UA + Client Hints are pinned to match `curl_impersonate` (default
-`chrome146`) via `fingerprint_contract.py`. Telemetry: `data/logs/reseller-http/`.
+HTTP fingerprint: UA + Client Hints are pinned to match `curl_impersonate` (auto-picks
+newest Chrome this `curl_cffi` supports) via `fingerprint_contract.py`. Telemetry:
+`data/logs/reseller-http/`.
 
 ## How it works
 
