@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from pokebot.enums import Retailer
 from pokebot.reseller.models import HarvestedToken, TokenKind

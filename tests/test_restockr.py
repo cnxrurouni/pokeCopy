@@ -1,4 +1,3 @@
-import pytest
 
 from pokebot.restockr.models import RestockAlert
 

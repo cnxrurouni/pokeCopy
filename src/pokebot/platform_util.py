@@ -694,35 +694,6 @@ end tell
     except Exception:
         return False, f"unexpected AppleScript result: {out[:200]}"
 
-    # #region agent log
-    try:
-        _dbg = {
-            "sessionId": "bf9575",
-            "hypothesisId": "Q8",
-            "location": "platform_util.py:click_target_atc_in_system_chrome",
-            "message": "atc_click_result",
-            "data": {
-                "clicked": bool(data.get("clicked")),
-                "want_qty": data.get("want_qty"),
-                "qty_selected": data.get("qty_selected"),
-                "qty_detail": data.get("qty_detail"),
-                "qty_probe": data.get("qty_probe"),
-                "trigger_after": (data.get("qty_probe") or {}).get("trigger_after"),
-                "menu_scan": (data.get("qty_probe") or {}).get("menu_scan"),
-                "reason": data.get("reason"),
-                "sel": data.get("sel"),
-                "tcin": tcin,
-            },
-            "timestamp": int(__import__("time").time() * 1000),
-        }
-        _p = Path("/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log")
-        _p.parent.mkdir(parents=True, exist_ok=True)
-        with _p.open("a", encoding="utf-8") as _fh:
-            _fh.write(json.dumps(_dbg, default=str) + "\n")
-    except Exception:
-        pass
-    # #endregion
-
     if data.get("clicked"):
         detail = f"clicked {data.get('sel')} {data.get('text')!r}"
         if data.get("qty_selected"):

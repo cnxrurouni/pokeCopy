@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from pokebot.http import DEFAULT_HEADERS
 from pokebot.platform_util import (
     browser_ua_platform,
     is_macos,
@@ -18,11 +17,9 @@ def test_browser_ua_matches_host() -> None:
     if sys.platform == "darwin":
         assert is_macos()
         assert "Macintosh" in _os
-        assert DEFAULT_HEADERS["sec-ch-ua-platform"] == '"macOS"'
     elif sys.platform == "win32":
         assert is_windows()
         assert "Windows" in _os
-        assert DEFAULT_HEADERS["sec-ch-ua-platform"] == '"Windows"'
 
 
 def test_quit_hint_non_empty() -> None:

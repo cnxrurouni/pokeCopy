@@ -24,6 +24,7 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+.cursor/
 *.swp
 *~
 
@@ -33,4 +34,3 @@ Thumbs.db
 
 # Local credential / account files (use the *.example.* templates)
 config/reseller.accounts.yaml
-config/target.credentials.yaml

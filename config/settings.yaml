@@ -12,8 +12,11 @@ autobuy:
   target_min_quantity: 1
   cooldown_seconds: 300
   dedup_window_seconds: 60
+  # Only target has an HTTP checkout client; other retailers listed here are
+  # surfaced and opened in Chrome for a manual buy.
   retailers:
     - target
+    - walmart
 
 # Discord → HTTP checkout (reseller run --source discord|both).
 # Requires DISCORD_BOT_TOKEN + bot invited to the server with Message Content Intent.

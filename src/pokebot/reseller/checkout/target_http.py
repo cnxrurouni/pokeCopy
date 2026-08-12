@@ -24,63 +24,6 @@ from pokebot.reseller.target_ids import (
 
 console = Console()
 
-# #region agent log
-_AGENT_DBG_PATH = Path(
-    "/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log"
-)
-
-
-def _agent_dbg(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any] | None = None,
-) -> None:
-    """Append one NDJSON debug line (no secrets)."""
-    try:
-        payload = {
-            "sessionId": "bf9575",
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data or {},
-            "timestamp": int(time.time() * 1000),
-        }
-        _AGENT_DBG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _AGENT_DBG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, default=str) + "\n")
-    except Exception:
-        pass
-
-
-def _cookie_lens(cookies: dict[str, str] | None) -> dict[str, int]:
-    return {k: len(v) for k, v in sorted((cookies or {}).items()) if v}
-
-
-def _jwt_safe_claims(access_token: str | None) -> dict[str, Any]:
-    if not access_token:
-        return {}
-    try:
-        from pokebot.doctor import decode_jwt_claims
-
-        claims = decode_jwt_claims(access_token) or {}
-        exp = claims.get("exp")
-        now = int(time.time())
-        return {
-            "iss": claims.get("iss"),
-            "sut": claims.get("sut"),
-            "asl": claims.get("asl"),
-            "sco": claims.get("sco"),
-            "exp_in_s": (int(exp) - now) if exp is not None else None,
-            "iat": claims.get("iat"),
-        }
-    except Exception as exc:
-        return {"decode_error": type(exc).__name__}
-
-
-# #endregion
-
-
 def _elapsed_seconds(elapsed: Any) -> float | None:
     """curl_cffi returns ``datetime.timedelta`` for ``Response.elapsed``."""
     if elapsed is None:
@@ -658,14 +601,6 @@ class TargetHttpCheckout(CheckoutClient):
         if resp.status_code != 200:
             return False, f"cart GET HTTP {resp.status_code}: {text[:180]!r}"
         if tcin in tcins:
-            # #region agent log
-            _agent_dbg(
-                "Q2",
-                "target_http.py:_verify_cart_has_tcin",
-                "cart_has_tcin",
-                {"tcin": tcin, "cart_qty": cart_qty, "items": tcins[:8]},
-            )
-            # #endregion
             qty_bit = f" qty={cart_qty}" if cart_qty is not None else ""
             return True, f"cart contains tcin={tcin}{qty_bit} (items={tcins})"
         return False, f"cart missing tcin={tcin} (items={tcins or '[]'})"
@@ -1001,60 +936,6 @@ class TargetHttpCheckout(CheckoutClient):
         if isinstance(parsed, dict):
             error_key = parsed.get("errorKey") or parsed.get("error_key")
             error_code = parsed.get("errorCode") or parsed.get("error_code")
-
-        # #region agent log
-        if req.name == "add_to_cart" or resp.status_code in (401, 403, 429):
-            body_keys: list[str] = []
-            if body:
-                with contextlib.suppress(Exception):
-                    parsed_body = json.loads(body)
-                    if isinstance(parsed_body, dict):
-                        body_keys = sorted(parsed_body.keys())
-            header_keys = sorted(k.lower() for k in headers)
-            _agent_dbg(
-                "H3",
-                "target_http.py:_fire_request",
-                "http_response",
-                {
-                    "step": req.name,
-                    "attempt": attempt,
-                    "phase": phase,
-                    "tcin": str(variables.get("tcin") or ""),
-                    "method": req.method,
-                    "status": resp.status_code,
-                    "error_key": error_key,
-                    "error_code": error_code,
-                    "auth_passed": not (
-                        resp.status_code in (401, 403)
-                        or error_key == "_ERR_AUTH_DENIED"
-                    ),
-                    "url_host_path": url.split("?", 1)[0],
-                    "has_query_key": "key=" in url,
-                    "impersonate": self.impersonate,
-                    "ua_snip": (headers.get("user-agent") or "")[:80],
-                    "sec_ch_ua": headers.get("sec-ch-ua"),
-                    "sec_ch_ua_platform": headers.get("sec-ch-ua-platform"),
-                    "referer_snip": (headers.get("referer") or "")[:120],
-                    "has_authorization": "authorization" in {k.lower() for k in headers},
-                    "auth_scheme": (
-                        "bearer"
-                        if str(headers.get("authorization") or "")
-                        .lower()
-                        .startswith("bearer ")
-                        else None
-                    ),
-                    "header_keys": header_keys,
-                    "cookie_names_sent": sorted(jar.keys()),
-                    "cookie_lens": _cookie_lens(jar),
-                    "body_keys": body_keys,
-                    "body_len": len(body or ""),
-                    "response_snip": (text or "")[:240],
-                    "resp_header_keys": sorted(k.lower() for k in resp_headers),
-                    "retry_after": resp_headers.get("Retry-After")
-                    or resp_headers.get("retry-after"),
-                },
-            )
-        # #endregion
 
         if self._telemetry is not None:
             elapsed = getattr(resp, "elapsed", None)
@@ -1705,19 +1586,6 @@ class TargetHttpCheckout(CheckoutClient):
             or f"https://www.target.com/p/-/A-{tcin}"
         )
         timeout_s = self.browser_assist_timeout_seconds
-        # #region agent log
-        _agent_dbg(
-            "H10",
-            "target_http.py:_assist_atc_via_system_chrome",
-            "assist_start",
-            {
-                "tcin": tcin,
-                "timeout_s": timeout_s,
-                "reason": reason,
-                "product_url_snip": product_url[:120],
-            },
-        )
-        # #endregion
         why = (
             "HTTP ATC skipped (browser-first)"
             if reason == "primary"
@@ -1734,14 +1602,6 @@ class TargetHttpCheckout(CheckoutClient):
         try:
             await asyncio.to_thread(open_url_in_system_chrome, product_url)
         except Exception as exc:
-            # #region agent log
-            _agent_dbg(
-                "H10",
-                "target_http.py:_assist_atc_via_system_chrome",
-                "assist_open_failed",
-                {"error": type(exc).__name__, "detail": str(exc)[:160]},
-            )
-            # #endregion
             return CheckoutOutcome(
                 False,
                 message=(
@@ -1758,18 +1618,6 @@ class TargetHttpCheckout(CheckoutClient):
         clicked, click_detail = await asyncio.to_thread(
             click_target_atc_in_system_chrome, tcin=tcin, quantity=browser_qty
         )
-        # #region agent log
-        _agent_dbg(
-            "Q1",
-            "target_http.py:_assist_atc_via_system_chrome",
-            "assist_click",
-            {
-                "clicked": clicked,
-                "browser_qty": browser_qty,
-                "detail": click_detail[:240],
-            },
-        )
-        # #endregion
         if clicked:
             console.print(f"[green]Auto-clicked Add to cart[/green] — {click_detail}")
             await asyncio.sleep(2.0)
@@ -1822,20 +1670,6 @@ class TargetHttpCheckout(CheckoutClient):
                 dismissed, dismiss_detail = await asyncio.to_thread(
                     dismiss_target_added_to_cart_drawer
                 )
-                # #region agent log
-                _agent_dbg(
-                    "H10",
-                    "target_http.py:_assist_atc_via_system_chrome",
-                    "assist_success",
-                    {
-                        "tcin": tcin,
-                        "attempt": attempt,
-                        "detail": detail[:200],
-                        "drawer_dismissed": dismissed,
-                        "dismiss_detail": dismiss_detail[:120],
-                    },
-                )
-                # #endregion
                 if dismissed:
                     console.print(
                         f"[dim]Dismissed Added-to-cart drawer — {dismiss_detail}[/dim]"
@@ -1891,14 +1725,6 @@ class TargetHttpCheckout(CheckoutClient):
             console.print(f"[dim]  cart poll #{attempt}: {detail}[/dim]")
             await asyncio.sleep(2.5)
 
-        # #region agent log
-        _agent_dbg(
-            "H10",
-            "target_http.py:_assist_atc_via_system_chrome",
-            "assist_timeout",
-            {"tcin": tcin, "attempts": attempt, "detail": (last_detail or "")[:200]},
-        )
-        # #endregion
         return CheckoutOutcome(
             False,
             message=(
@@ -1960,18 +1786,6 @@ class TargetHttpCheckout(CheckoutClient):
                         variables=variables,
                         attempt=0,
                     )
-                    # #region agent log
-                    _agent_dbg(
-                        "H6",
-                        "target_http.py:_run_chain",
-                        "pre_atc_cart_check",
-                        {
-                            "tcin": tcin,
-                            "already_in_cart": already,
-                            "detail": (already_detail or "")[:200],
-                        },
-                    )
-                    # #endregion
                     if already:
                         console.print(
                             f"[green]ATC skipped[/green] — already in cart ({already_detail})"
@@ -1996,20 +1810,6 @@ class TargetHttpCheckout(CheckoutClient):
                     and any(s.startswith("checkout") for s in completed)
                     and any(s.startswith("pre_checkout") for s in completed)
                 )
-                # #region agent log
-                _agent_dbg(
-                    "H11",
-                    "target_http.py:_run_chain",
-                    "preflight_final_cart",
-                    {
-                        "tcin": tcin,
-                        "ok": ok,
-                        "rate_limited_override": rate_limited,
-                        "detail": (detail or "")[:220],
-                        "completed": list(completed),
-                    },
-                )
-                # #endregion
                 if not ok and not rate_limited:
                     return CheckoutOutcome(
                         False,
@@ -2065,14 +1865,6 @@ class TargetHttpCheckout(CheckoutClient):
                 # Browser-first when enabled: hot SKUs always AUTH_DENIED on HTTP ATC,
                 # so skip the useless 401 spam and open everyday Chrome immediately.
                 if self.browser_assist_atc and tcin:
-                    # #region agent log
-                    _agent_dbg(
-                        "H10",
-                        "target_http.py:_run_chain",
-                        "browser_atc_primary",
-                        {"tcin": tcin, "skip_http_atc": True},
-                    )
-                    # #endregion
                     assisted = await self._assist_atc_via_system_chrome(
                         session,
                         tcin=tcin,
@@ -2186,14 +1978,6 @@ class TargetHttpCheckout(CheckoutClient):
         # browser session (sut→G / REMEMBERED) and forced a second login, defeating
         # `pokebot login target`. Order: login/warm once → export jar → HTTP only.
         if self.warm_cart_checkout:
-            # #region agent log
-            _agent_dbg(
-                "K",
-                "target_http.py:_place_order_live",
-                "warm_start",
-                {"dwell": self.warm_dwell_seconds, "tcin": variables.get("tcin")},
-            )
-            # #endregion
             try:
                 from pokebot.chrome_login import warm_target_cart_checkout
 
@@ -2203,35 +1987,7 @@ class TargetHttpCheckout(CheckoutClient):
                 # Re-load cookies after warm re-export.
                 cookies = self._merged_cookies(ctx)
                 sent = self._cookies_for_request(cookies)
-                # #region agent log
-                sidecar_age = None
-                with contextlib.suppress(Exception):
-                    from pokebot.session_auth import session_auth_path
-
-                    sp = session_auth_path("target")
-                    if sp.exists():
-                        sidecar_age = round(time.time() - sp.stat().st_mtime, 1)
-                _agent_dbg(
-                    "K",
-                    "target_http.py:_place_order_live",
-                    "warm_done",
-                    {
-                        "sidecar_age_s": sidecar_age,
-                        "cookie_lens": _cookie_lens(sent),
-                        "jwt": _jwt_safe_claims(sent.get("accessToken")),
-                        "has_px3": "_px3" in sent,
-                    },
-                )
-                # #endregion
             except Exception as exc:
-                # #region agent log
-                _agent_dbg(
-                    "K",
-                    "target_http.py:_place_order_live",
-                    "warm_failed",
-                    {"error": type(exc).__name__, "detail": str(exc)[:200]},
-                )
-                # #endregion
                 return CheckoutOutcome(
                     False,
                     message=(
@@ -2272,41 +2028,6 @@ class TargetHttpCheckout(CheckoutClient):
             + (f"; MISSING {missing}" if missing else "")
             + f"; telemetry → {self._telemetry.path})[/dim]"
         )
-        # #region agent log
-        sidecar_age = None
-        with contextlib.suppress(Exception):
-            from pokebot.session_auth import session_auth_path
-
-            sp = session_auth_path("target")
-            if sp.exists():
-                sidecar_age = round(time.time() - sp.stat().st_mtime, 1)
-        _agent_dbg(
-            "A-B-C",
-            "target_http.py:_place_order_live",
-            "pre_atc_session",
-            {
-                "tcin": variables.get("tcin"),
-                "qty": variables.get("quantity"),
-                "product_url_snip": str(variables.get("product_url") or "")[:120],
-                "impersonate": self.impersonate,
-                "identity_ua_snip": (self._identity.user_agent or "")[:80],
-                "identity_sec_ch_ua": self._identity.sec_ch_ua,
-                "warm_cart_checkout": self.warm_cart_checkout,
-                "preflight": self.preflight,
-                "sidecar_age_s": sidecar_age,
-                "merged_cookie_names": sorted(cookies.keys()),
-                "essential_cookie_names": sorted(sent.keys()),
-                "cookie_lens": _cookie_lens(sent),
-                "missing_required": missing,
-                "jwt": _jwt_safe_claims(sent.get("accessToken")),
-                "has_px3": "_px3" in sent,
-                "has_px2": "_px2" in sent,
-                "has_pxvid": "_pxvid" in sent,
-                "has_login_session": "login-session" in sent,
-                "telemetry_path": str(self._telemetry.path),
-            },
-        )
-        # #endregion
         session = await asyncio.to_thread(self._build_session, ctx)
         if self.skip_atc:
             console.print(

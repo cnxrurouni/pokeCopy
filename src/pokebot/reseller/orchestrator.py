@@ -20,6 +20,10 @@ console = Console()
 
 AlertSource = Literal["restockr", "discord"]
 
+# Stores with an HTTP checkout client. Everything else in autobuy.retailers is
+# surfaced and opened in Chrome for a manual buy.
+CHECKOUT_STORES = {"target"}
+
 
 def _sidecar_age_seconds(*, mobile: bool = False) -> float | None:
     from pokebot.session_auth import MOBILE_RETAILER, session_auth_path
@@ -47,6 +51,9 @@ class ResellerOrchestrator:
         self.pipeline = TargetPipeline.build(self.reseller_settings)
         self.profile = None
         self.parent_id: str | None = None
+        self.retailers = {
+            normalize_store(r) for r in settings.autobuy.retailers
+        } or {"target"}
         self._tracker = ActedAlertTracker(
             cooldown_seconds=settings.autobuy.cooldown_seconds,
             dedup_window_seconds=settings.autobuy.dedup_window_seconds,
@@ -122,6 +129,13 @@ class ResellerOrchestrator:
             f"checkout_channel={self.reseller_settings.checkout_channel} "
             f"({channel_label})[/dim]"
         )
+        buys = sorted(self.retailers & CHECKOUT_STORES)
+        opens = sorted(self.retailers - CHECKOUT_STORES)
+        console.print(
+            f"[dim]Retailers: auto-checkout={', '.join(buys) or 'none'} "
+            f"open-only={', '.join(opens) or 'none'} "
+            "(edit autobuy.retailers in config/settings.yaml)[/dim]"
+        )
         console.print(
             "[dim]After checkout attempt, watchlist / Discord hits open in everyday "
             "Chrome (default profile). Opens after ATC so browser + bot don't share a "
@@ -186,29 +200,6 @@ class ResellerOrchestrator:
 
     async def _open_in_chrome(self, url: str) -> None:
         console.print(f"[bold green]Opening in Chrome[/bold green] → {url}")
-        # #region agent log
-        try:
-            import json
-            import time
-            from pathlib import Path
-
-            path = Path(
-                "/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log"
-            )
-            payload = {
-                "sessionId": "bf9575",
-                "hypothesisId": "E",
-                "location": "orchestrator.py:_open_in_chrome",
-                "message": "chrome_open",
-                "data": {"url_snip": (url or "")[:120], "when": "post_checkout"},
-                "timestamp": int(time.time() * 1000),
-            }
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload) + "\n")
-        except Exception:
-            pass
-        # #endregion
         try:
             await asyncio.to_thread(open_url_in_system_chrome, url)
         except Exception as exc:
@@ -224,10 +215,10 @@ class ResellerOrchestrator:
         sku = alert.sku or alert.id
         url = alert.resolve_url(self.parent_id)
 
-        if store != "target":
+        if store not in self.retailers:
             return
 
-        label = "Discord" if source == "discord" else "Target restock"
+        label = "Discord" if source == "discord" else f"{store.capitalize()} restock"
         console.print(
             f"[cyan]{label} signal[/cyan] {alert.product or sku} "
             f"(qty={alert.stock_quantity})"
@@ -251,9 +242,26 @@ class ResellerOrchestrator:
             min_qty = self.settings.autobuy.target_min_quantity
             if alert.stock_quantity < min_qty:
                 console.print(
-                    f"[dim]Skipped — Target qty {alert.stock_quantity} < min {min_qty}[/dim]"
+                    f"[dim]Skipped — {store} qty {alert.stock_quantity} "
+                    f"< min {min_qty}[/dim]"
                 )
                 return
+
+        if store not in CHECKOUT_STORES:
+            async with self._tracker.acquire(
+                AlertKey(vendor=store, sku=sku)
+            ) as should_proceed:
+                if not should_proceed:
+                    console.print(
+                        f"[dim]Skipped — already acting on {store}/{sku}[/dim]"
+                    )
+                    return
+                console.print(
+                    f"[yellow]No {store} checkout client[/yellow] — "
+                    "opening in Chrome to buy manually"
+                )
+                await self._open_in_chrome(url)
+            return
 
         if sku in self._purchased_skus:
             console.print(f"[dim]Skipped — already purchased {sku} this session[/dim]")
@@ -269,35 +277,6 @@ class ResellerOrchestrator:
                 f"[bold green]Reseller checkout triggered[/bold green] → {url} "
                 f"(qty={alert.stock_quantity} source={source})"
             )
-            # #region agent log
-            try:
-                import json
-                import time
-                from pathlib import Path
-
-                path = Path(
-                    "/Users/belindaho/Documents/GitHub/pokeCopy/.cursor/debug-bf9575.log"
-                )
-                payload = {
-                    "sessionId": "bf9575",
-                    "hypothesisId": "E",
-                    "location": "orchestrator.py:_handle_restock",
-                    "message": "checkout_start",
-                    "data": {
-                        "sku": sku,
-                        "source": source,
-                        "on_watchlist": on_watchlist,
-                        "qty": alert.stock_quantity,
-                        "url_snip": (url or "")[:120],
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(payload) + "\n")
-            except Exception:
-                pass
-            # #endregion
             result = await self.pipeline.handle_alert(alert, parent_id=self.parent_id)
             open_chrome = (
                 self.settings.discord.open_in_chrome
